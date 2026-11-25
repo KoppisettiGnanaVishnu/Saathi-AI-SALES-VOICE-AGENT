@@ -8,15 +8,15 @@ Sales teams lose revenue in the first minutes of an inbound enquiry. Leads arriv
 
 ## 2. What was built
 
-A working web application with a React voice UI and a FastAPI backend. The agent runs a structured sales conversation through **greeting → discovery → qualification → objection handling → booking → closing**. Each turn retrieves the three most relevant chunks from an eight-document knowledge base, calls local Llama 3.2 3B through Ollama with a strict JSON contract, updates a structured lead profile and sentiment, and persists the result in SQLite. A deterministic layer extracts explicit facts (name, company, contact, budget, timeline, role) so the small model cannot lose them, and an explainable 0–100 score maps the lead to Hot/Warm/Cold. Qualified leads are offered live weekday slots; booking is double-booking-safe and written to the CRM store. Ending the call produces a summary, objections, sentiment trend, next action and aggregate insights. English and Hindi both work end to end.
+A working web application with a React voice UI and a FastAPI backend. The agent runs a structured sales conversation through **greeting → discovery → qualification → objection handling → booking → closing**. Each turn retrieves relevant chunks from the local markdown knowledge base, uses a strict JSON LLM contract (Groq OpenAI-compatible optional, local Ollama fallback), and applies deterministic grounding/extraction guardrails. It updates a structured lead profile (including call volume), sentiment, and explainable 0–100 Hot/Warm/Cold score, then persists state in SQLite. Booking is identity-gated, offers clickable slot chips, validates slots, prevents double booking, and writes to the CRM store. Ending the call produces a summary, objections, sentiment trend, next action, and aggregate insights. English and Hindi work end to end.
 
 ## 3. Technical implementation
 
-- **Voice:** browser Web Speech API for free STT/TTS, isolated behind hooks so Whisper/Piper can replace it.
-- **Reasoning:** Ollama + `llama3.2:3b`, low temperature, JSON-only output with repair and retry, plus a deterministic fallback so a demo never dies.
-- **RAG:** heading-aware Markdown chunking, `nomic-embed-text` embeddings, cosine similarity, Hindi/English query expansion, intent-aware source boosting, and keyword fallback when embeddings are unavailable.
-- **State:** SQLite tables for leads, appointments, calls and turn analytics; in-process session memory for context.
-- **Reliability:** Pydantic validation, typed tool actions, slot re-validation at booking, guarded demo reset, and 13 unit tests covering scoring, extraction, retrieval, slots and concurrency.
+- **Voice:** browser Web Speech STT; local Kokoro-82M neural TTS through `/api/tts` with browser `speechSynthesis` fallback. Streaming chat emits sentence events for progressive speech.
+- **Reasoning:** configurable LLM provider: Groq/OpenAI-compatible optional, local Ollama `llama3.2:3b` fallback. Strict JSON contract, repair/retry, Groq->Ollama fallback, and deterministic grounded handlers for key sales facts and out-of-scope boundaries.
+- **RAG:** heading-aware Markdown chunking, local `nomic-embed-text` embeddings, cosine similarity, Hindi/English query expansion, intent-aware source boosting, and keyword fallback.
+- **State/CRM:** SQLite tables for leads, appointments, calls, and turn analytics; in-process session memory. Lead profile includes call volume, stage, sentiment, score, and booking.
+- **Reliability:** Pydantic validation, identity-gated booking, clickable slot selection, slot re-validation, guarded demo reset, and pytest coverage for scoring, extraction, retrieval, slots, double-booking, and booking flow.
 
 ## 4. Commercial feasibility
 
@@ -28,7 +28,7 @@ The MVP is single-node; production is horizontal. Sessions move to Redis, data t
 
 ## 6. Security, infrastructure and deployment
 
-PII is minimised to sales-relevant fields; secrets live in environment variables or a managed store; demo reset is disabled outside demos. Production adds TLS, encryption at rest, tenant-scoped row access, audit logs, retention and deletion workflows, and consent before recording. India’s DPDP Act and EU GDPR/data residency are the governing constraints. Deployment is containerised: React static assets on a CDN, FastAPI in Docker behind an ingress, managed Postgres and Redis, GPU inference in a private subnet, and CI running tests, linting and image scanning before rollout. Observability covers structured logs, per-stage latency, conversion metrics and alerts on model or booking failures.
+PII is minimised to sales-relevant fields; secrets/LLM keys live in env vars or a managed secret store (`backend/.env` is gitignored). Demo reset is guarded by config. Production adds TLS, encryption at rest, tenant-scoped row access, audit logs, retention/deletion workflows, consent before recording, and data residency controls. India’s DPDP Act and EU GDPR are governing constraints. Deployment is containerised: React static assets on CDN, FastAPI behind ingress, managed Postgres/Redis, optional GPU/local-model nodes, and CI running tests/lint/image scan before rollout. Observability should cover structured logs, per-stage latency, LLM fallback rate, booking conversion, and model/booking failures.
 
 ## 7. Operating cost (indicative, self-hosted)
 
@@ -36,4 +36,4 @@ A single 24 GB GPU node runs the 3B model and embeddings for early volume at rou
 
 ## 8. Limitations and next steps
 
-Browser STT may use vendor cloud services, so a privacy-critical deployment must switch to self-hosted Whisper/Piper. The 3B model needs the deterministic guardrails already in place; a 7B–8B model or fine-tune is the next quality step. CRM and calendar are adapters over SQLite and should connect to HubSpot/Salesforce and Calendly/Google Calendar. Telephony, barge-in, voicemail detection and warm transfer are the next product milestones.
+Browser STT may use vendor cloud services; privacy-critical deployments should use self-hosted Whisper/faster-whisper. Kokoro local TTS improves voice quality, but production should add streaming telephony-grade audio and barge-in. The optional Groq path improves quality but adds external dependency/rate-limit risk; the local Ollama + deterministic guardrails remain the free fallback. CRM and calendar are SQLite adapters and should connect to HubSpot/Salesforce/Calendly/Google Calendar. Telephony (Twilio/Exotel/SIP), warm transfer, voicemail detection, and observability are the next product milestones.

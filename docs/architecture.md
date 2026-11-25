@@ -11,25 +11,26 @@ flowchart TB
     subgraph Client["Browser (React + Vite)"]
         MIC[Microphone] --> STT[SpeechRecognition]
         STT --> APP[App state]
-        APP --> TTS[SpeechSynthesis]
-        APP --> PANEL[Lead / CRM panel]
-        APP --> SUMMARY[Summary modal]
+        APP --> UI[Transcript, Lead CRM, Summary]
+        APP --> AUDIO[Audio player]
     end
 
     subgraph API["FastAPI backend"]
-        ROUTES[REST routes]
+        ROUTES[REST + SSE chat stream]
         AGENT[Sales agent orchestrator]
-        PROMPT[Prompt builder]
+        PROMPT[Prompt builder / grounding]
         EXTRACT[Deterministic extractor]
         SCORE[Lead scorer]
         SENT[Sentiment fusion]
         TOOLS[Booking / CRM tools]
+        TTSAPI[/api/tts]
     end
 
-    subgraph Intelligence["Local AI"]
-        OLLAMA[Ollama server]
-        LLM[llama3.2:3b]
-        EMB[nomic-embed-text]
+    subgraph Intelligence["AI providers"]
+        GROQ[Groq OpenAI-compatible, optional]
+        OLLAMA[Ollama llama3.2:3b fallback/local]
+        EMB[Ollama nomic-embed-text]
+        KOKORO[Kokoro local TTS]
     end
 
     subgraph Data["Persistence"]
@@ -37,13 +38,12 @@ flowchart TB
         SQL[(SQLite: leads, appointments, calls, turns)]
     end
 
-    APP -->|POST /api/chat| ROUTES
+    APP -->|POST /api/chat or /stream| ROUTES
     ROUTES --> AGENT
     AGENT --> PROMPT
+    PROMPT --> GROQ
     PROMPT --> OLLAMA
-    OLLAMA --> LLM
-    AGENT -->|embed query| OLLAMA
-    OLLAMA --> EMB
+    AGENT -->|embed query| EMB
     AGENT -->|top-k chunks| KB
     AGENT --> EXTRACT
     EXTRACT --> SCORE
@@ -52,8 +52,12 @@ flowchart TB
     TOOLS --> SQL
     SCORE --> SQL
     SENT --> SQL
-    AGENT -->|JSON reply| ROUTES
+    AGENT -->|JSON reply + slots + state| ROUTES
     ROUTES --> APP
+    APP -->|POST /api/tts| TTSAPI
+    TTSAPI --> KOKORO
+    KOKORO --> AUDIO
+    AUDIO -->|fallback| BROWSER[Browser speechSynthesis]
 ```
 
 ## 3. Turn lifecycle
@@ -65,25 +69,27 @@ sequenceDiagram
     participant B as Browser
     participant A as FastAPI
     participant R as Retriever
-    participant L as Ollama
+    participant L as LLM (Groq/Ollama)
     participant D as SQLite
+    participant T as Kokoro TTS
 
-    U->>B: speaks a question
-    B->>B: STT transcript
-    B->>A: POST /api/chat {session_id, message, language}
+    U->>B: speaks/types a question
+    B->>B: STT transcript (browser)
+    B->>A: POST /api/chat/stream {session_id, message, language}
     A->>R: search(message, k=3)
     R-->>A: chunks + sources
-    A->>L: chat_json(system + history + chunks + slots)
-    L-->>A: {reply, lead_updates, sentiment, stage, action}
-    A->>A: merge LLM + deterministic extraction
-    A->>A: fuse sentiment, rescore lead
-    alt booking action
-        A->>D: validate slot and insert appointment
+    A->>A: deterministic fact extract + booking gate
+    A->>L: chat_json / stream (if not deterministic)
+    L-->>A: reply/JSON
+    A->>A: grounding/fallback checks, sentiment fusion, score
+    alt explicit slot booking
+        A->>D: validate slot + insert appointment
     end
     A->>D: upsert lead, append turn analytics
-    A-->>B: reply + lead + score + sources + booking
-    B->>B: render transcript, update panel
-    B->>U: TTS speaks the reply
+    A-->>B: sentence events + final state (slots/booking/lead)
+    B->>T: POST /api/tts per sentence
+    T-->>B: audio (or browser TTS fallback)
+    B->>U: progressive speech + updated transcript/CRM panel
 ```
 
 ## 4. Retrieval design
@@ -94,17 +100,17 @@ sequenceDiagram
 4. Keyword search tokenises the query, expands Hindi terms and English synonyms (`cost → pricing price plan`, `integrate → crm calendar`), scores overlap with a heading bonus, and applies an intent-aware source boost so pricing questions prefer `03-pricing.md` and security questions prefer `04-security.md`.
 5. Retrieved sources are returned to the UI and injected into the prompt; the prompt forbids inventing facts outside them.
 
-## 5. Reliability around a 3B model
+## 5. Reliability and grounding
 
 | Risk | Mitigation |
 |---|---|
-| Malformed JSON | Extraction of the first JSON object, trailing-comma repair, one retry, then scripted fallback |
-| Missed lead facts | Deterministic regex extraction for email, phone, name, company, budget, timeline, role |
-| Wrong pricing | Explicit prompt rule to quote the knowledge-base plans; pricing document boosted in retrieval |
-| Stuck in greeting | Monotonic stage advancement based on captured fields and booking state |
-| Tone under-read | LLM sentiment fused with a transparent positive/negative lexicon |
-| Double booking | Slot re-validation inside a transaction; unique constraint on slot time |
-| Model offline | Scripted conversational fallback keeps the demo usable |
+| Malformed/empty LLM JSON | JSON extraction/repair, Groq->Ollama fallback, deterministic grounded fallback replies |
+| Hallucinated/out-of-scope answers | KB-grounded handlers for pricing/security/product/integration/timeline; safe KB-boundary response for out-of-scope questions |
+| Missed lead facts | Deterministic regex extraction for name, company, email, phone, budget, timeline, role, call volume |
+| Premature/wrong booking | Identity gate before showing slots, clickable slot selection, slot re-validation, DB unique constraint on slot time |
+| Streaming/final mismatch | Stream discards bad/partial model output; final state is authoritative; booking confirmations kept consistent |
+| Model/provider outage | Groq optional; local Ollama fallback; deterministic scripted replies keep demo usable |
+| TTS unavailable | Local Kokoro preferred; browser speech synthesis fallback |
 
 ## 6. Data model
 

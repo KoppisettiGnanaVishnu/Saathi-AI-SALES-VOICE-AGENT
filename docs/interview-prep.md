@@ -2,7 +2,7 @@
 
 ## 1. “Walk me through the architecture.”
 
-Browser captures speech, converts it to text with the Web Speech API, and posts the turn to FastAPI. The backend retrieves the top three knowledge chunks, builds a system prompt containing the lead profile, recent history, retrieved excerpts and live slots, and asks Ollama for strict JSON. The response is parsed, merged with deterministic fact extraction, sentiment is fused with a lexicon, the lead is rescored, and any booking action is validated and written to SQLite. The API returns the reply plus structured state, and the UI renders it and speaks it with TTS.
+Browser captures speech with Web Speech STT and posts text to FastAPI (`/api/chat` or `/api/chat/stream`). The backend retrieves top knowledge chunks, applies deterministic extraction and booking/grounding guardrails, and calls the configured LLM (Groq OpenAI-compatible optionally, local Ollama fallback). The response is parsed into strict JSON, merged with deterministic facts (including call volume), sentiment is fused, lead is rescored, and booking actions are validated against SQLite. The API returns reply + structured state + slots. The frontend renders transcript/CRM updates and speaks progressively via local Kokoro TTS (`/api/tts`) with browser TTS fallback.
 
 ## 2. “Why a 3B model, and how do you keep it reliable?”
 
@@ -34,7 +34,7 @@ Minimise PII, encrypt in transit and at rest, scope every row by tenant, keep se
 
 ## 9. “What are the weaknesses of this MVP?”
 
-Browser STT is not guaranteed to be local, SQLite and in-memory sessions do not survive horizontal scaling, the 3B model can be verbose or miss nuance, CRM/calendar are adapters rather than real integrations, and there is no telephony or barge-in yet. Each has a named production replacement in the architecture document.
+Browser STT can be browser/cloud-dependent; SQLite and in-memory sessions are single-node; external LLMs can be unstable/rate-limited (we fallback, but quality varies); CRM/calendar are adapters rather than real HubSpot/Salesforce/Google Calendar integrations; no telephony/barge-in/warm transfer yet. Each has a named production replacement in the architecture/report.
 
 ## 10. Live-coding tasks to rehearse
 
@@ -57,9 +57,9 @@ Browser STT is not guaranteed to be local, SQLite and in-memory sessions do not 
 
 ## 12. Numbers worth remembering
 
-- Knowledge base: 8 documents, 69 chunks.
+- Knowledge base: markdown docs in `data/knowledge/` (chunked at startup; chunk count logged in `/api/health`).
 - Lead score weights: 25 / 20 / 20 / 15 / 10 / 10, sentiment ±10.
 - Hot ≥ 70, Warm ≥ 40.
-- 13 unit tests, all passing.
+- Pytest suite passing locally (24 tests after booking-flow regression added).
 - Scripted English demo: lead score 90+ and a confirmed booking in four turns.
 - Indicative production footprint: ~$500–$900/month for a small self-hosted deployment.
