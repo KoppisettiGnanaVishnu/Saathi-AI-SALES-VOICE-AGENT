@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Local runtime data
+backend/data/*
+!backend/data/.gitkeep
+*.sqlite3
+*.db
+*.log
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
