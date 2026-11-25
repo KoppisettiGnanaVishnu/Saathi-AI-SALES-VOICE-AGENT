@@ -1,10 +1,4 @@
-const STAGE_ORDER = [
-  "greeting",
-  "discovery",
-  "qualification",
-  "booking",
-  "closing",
-];
+const STAGE_ORDER = ["greeting", "discovery", "qualification", "booking", "closing"];
 
 const STAGE_LABELS = {
   greeting: "Greeting",
@@ -18,36 +12,18 @@ const FIELDS = [
   ["name", "Name"],
   ["company", "Company"],
   ["need", "Need"],
+  ["call_volume", "Call volume"],
   ["budget", "Budget"],
   ["timeline", "Timeline"],
-  ["decision_role", "Decision role"],
-  ["email", "Email"],
-  ["phone", "Phone"],
 ];
-
-function timeAgo(iso) {
-  if (!iso) return null;
-  const timestamp = new Date(iso).getTime();
-  if (Number.isNaN(timestamp)) return null;
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 10) return "just now";
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ago`;
-}
 
 export default function LeadPanel({
   lead,
   score,
   status,
-  sentiment,
   stage,
   booking,
   slots,
-  knowledgeUsed,
-  crmSyncedAt,
   busy,
   onBookSlot,
 }) {
@@ -58,142 +34,88 @@ export default function LeadPanel({
       : stage === "objection_handling"
         ? 2
         : Math.max(0, STAGE_ORDER.indexOf(stage));
-  const filled = FIELDS.filter(([key]) => lead?.[key]).length;
-  const sources = [...new Set(knowledgeUsed || [])].slice(0, 4);
+  const captured = FIELDS.filter(([key]) => lead?.[key]).length;
 
   return (
-    <aside className="lead-panel">
-      <div className="lead-panel__head">
-        <div>
-          <span className="eyebrow">CRM record</span>
-          <h2>Lead profile</h2>
+    <aside className="panel" aria-label="Conversation context">
+      <section className="panel__section">
+        <div className="panel__heading">
+          <h2 className="panel__title">Lead</h2>
+          <span className={`status-pill status-pill--${status}`}>{status}</span>
         </div>
-        <span className={`pill pill--${status}`}>{status}</span>
-      </div>
 
-      <div className="score-row">
-        <div className="score-ring" style={{ "--score": clampedScore }}>
-          <div className="score-ring__inner">
-            <span>{clampedScore}</span>
-            <small>/100</small>
+        <div className="score">
+          <div className="score__meta">
+            <span className="score__label">Qualification</span>
+            <span className="score__value">{clampedScore}<span className="score__max">/100</span></span>
+          </div>
+          <div className="score__track" role="progressbar" aria-valuenow={clampedScore} aria-valuemin={0} aria-valuemax={100}>
+            <div className={`score__bar score__bar--${status}`} style={{ width: `${clampedScore}%` }} />
           </div>
         </div>
-        <div className="score-copy">
-          <strong>Lead score</strong>
-          <p>
-            Deterministic score from need, budget, timeline, authority, company
-            and sentiment.
-          </p>
-        </div>
-      </div>
 
-      <div className="stage-block">
-        <div className="stage-block__head">
-          <span>Conversation stage</span>
-          <span className={`sentiment sentiment--${sentiment}`}>
-            {sentiment}
-          </span>
+        <div className="details">
+          {FIELDS.map(([key, label]) => {
+            const value = lead?.[key];
+            return (
+              <div className={`detail ${value ? "detail--filled" : ""}`} key={key}>
+                <span className="detail__label">{label}</span>
+                <span className="detail__value">{value || "—"}</span>
+              </div>
+            );
+          })}
         </div>
-        <div className="stage-track">
-          {STAGE_ORDER.map((item, index) => (
-            <div
-              className={`stage-step ${
-                index <= stageIndex ? "stage-step--done" : ""
-              } ${index === stageIndex ? "stage-step--active" : ""}`}
-              key={item}
-            >
-              <span className="stage-step__dot" />
-              <span className="stage-step__label">{STAGE_LABELS[item]}</span>
-            </div>
-          ))}
-        </div>
-      </div>
+      </section>
 
-      <div className="crm-row">
-        <span className={`crm-dot ${crmSyncedAt ? "crm-dot--on" : ""}`} />
-        <span>
-          {crmSyncedAt
-            ? `CRM synced ${timeAgo(crmSyncedAt)}`
-            : "CRM awaiting first update"}
+      <section className="panel__section">
+        <div className="panel__heading">
+          <h2 className="panel__title">Stage</h2>
+        </div>
+        <div className="stages" aria-label="Conversation stage">
+          {STAGE_ORDER.map((item, index) => {
+            const active = index === stageIndex;
+            const done = index < stageIndex;
+            return (
+              <div className={`stage ${active ? "stage--active" : ""} ${done ? "stage--done" : ""}`} key={item}>
+                <span className="stage__dot" aria-hidden="true" />
+                <span className="stage__label">{STAGE_LABELS[item]}</span>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="panel__section panel__section--booking">
+        <div className="panel__heading">
+          <h2 className="panel__title">Demo</h2>
+          {booking && <span className="status-pill status-pill--booked">Booked</span>}
+        </div>
+
+        {booking ? (
+          <div className="booking-card">
+            <div className="booking-card__label">30-min Fortivex demo</div>
+            <div className="booking-card__time">{booking.label}</div>
+          </div>
+        ) : slots.length > 0 ? (
+          <div className="slots">
+            {slots.map((slot) => (
+              <button type="button" className="slot" key={slot.id} onClick={() => onBookSlot(slot.id)} disabled={busy}>
+                <span className="slot__label">{slot.label}</span>
+                <span className="slot__action">Book</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="panel__empty">When Saathi offers demo times, clickable slots will appear here and in the chat.</p>
+        )}
+      </section>
+
+      <div className="panel__footer">
+        <span className="panel__footnote">
+          {captured.length > 0 ? `${captured.length} detail${captured.length !== 1 ? "s" : ""} captured` : "CRM record updates live"}
+          {booking ? " · Demo booked" : ""}
         </span>
       </div>
-
-      {booking && (
-        <div className="booking-card">
-          <span className="booking-card__icon">📅</span>
-          <div>
-            <strong>Demo booked</strong>
-            <span>{booking.label}</span>
-          </div>
-        </div>
-      )}
-
-      <div className="panel-section">
-        <div className="panel-section__head">
-          <h3>Captured details</h3>
-          <span>{filled}/8</span>
-        </div>
-        <div className="fields">
-          {FIELDS.map(([key, label]) => (
-            <div
-              className={`field ${key === "need" ? "field--wide" : ""}`}
-              key={key}
-            >
-              <span className="field__label">{label}</span>
-              <span
-                className={`field__value ${lead?.[key] ? "" : "field__value--empty"}`}
-                title={lead?.[key] || ""}
-              >
-                {lead?.[key] || "—"}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {!booking && slots.length > 0 && (
-        <div className="panel-section">
-          <div className="panel-section__head">
-            <h3>Available demo slots</h3>
-            <span>{slots.length}</span>
-          </div>
-          <div className="slot-list">
-            {slots.slice(0, 4).map((slot) => (
-              <div className="slot" key={slot.id}>
-                <span>{slot.label}</span>
-                <button
-                  type="button"
-                  className="slot__btn"
-                  onClick={() => onBookSlot(slot.id)}
-                  disabled={busy}
-                >
-                  Book
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {sources.length > 0 && (
-        <div className="panel-section">
-          <div className="panel-section__head">
-            <h3>Grounded on</h3>
-          </div>
-          <div className="chips">
-            {sources.map((source) => (
-              <span className="source-chip" key={source}>
-                📄 {source}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <p className="panel-note">
-        Updates sync to the CRM after every turn. In production this adapter
-        writes to HubSpot or Salesforce.
-      </p>
     </aside>
   );
 }

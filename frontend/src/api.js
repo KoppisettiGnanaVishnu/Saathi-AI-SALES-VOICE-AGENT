@@ -77,6 +77,9 @@ export const api = {
   endCall: (sessionId) =>
     request(`/api/session/${sessionId}/end`, { method: "POST" }),
   insights: () => request("/api/insights"),
+  leads: () => request("/api/leads"),
+  appointments: () => request("/api/appointments"),
+  calls: () => request("/api/calls"),
   health: () => request("/api/health"),
   reset: () => request("/api/demo/reset", { method: "POST" }),
 };

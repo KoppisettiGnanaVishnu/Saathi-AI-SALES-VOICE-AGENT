@@ -10,125 +10,77 @@ export default function Header({
   voiceEnabled,
   onToggleVoice,
   sttSupported,
-  voiceEngine,
-  voiceAvailable,
 }) {
   const llm = health?.llm;
-  const rag = health?.rag;
-  const neuralVoice = voiceAvailable || voiceEngine === "neural";
-
-  let badgeClass = "badge--warn";
-  let badgeText = "Checking Ollama";
-  let badgeTitle = "Checking the local model status";
-
-  if (llm) {
-    if (!llm.reachable) {
-      badgeClass = "badge--bad";
-      badgeText = "Ollama offline";
-      badgeTitle = llm.error || "Start Ollama and retry";
-    } else if (!llm.model_installed) {
-      badgeClass = "badge--warn";
-      badgeText = "Model not pulled";
-      badgeTitle = `Run: ollama pull ${llm.model}`;
-    } else {
-      badgeClass = "badge--ok";
-      badgeText = "Local LLM ready";
-      badgeTitle = llm.model;
-    }
-  }
+  const llmReady = Boolean(llm?.reachable && llm?.model_installed);
 
   return (
     <header className="header">
       <div className="brand">
-        <div className="brand__mark">F</div>
-        <div>
-          <h1 className="brand__name">Fortivex AI</h1>
-          <p className="brand__sub">Saathi · A companion for business conversations</p>
+        <div className="brand__mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 3v3" /><path d="M12 18v3" /><path d="M4.2 7.5l2.6 1.5" /><path d="M17.2 15l2.6 1.5" /><path d="M4.2 16.5l2.6-1.5" /><path d="M17.2 9l2.6-1.5" /><circle cx="12" cy="12" r="4.2" />
+          </svg>
+        </div>
+        <div className="brand__copy">
+          <div className="brand__name">Saathi</div>
+          <div className="brand__sub">by Fortivex AI</div>
         </div>
       </div>
 
-      <div className="header__badges">
-        <span className={`badge ${badgeClass}`} title={badgeTitle}>
-          <span className="badge__dot" />
-          {badgeText}
-        </span>
-        <span className="badge badge--muted" title="Knowledge retrieval mode">
-          RAG · {rag?.mode || "…"}
-        </span>
-        <span
-          className={`badge ${neuralVoice ? "badge--ok" : "badge--muted"}`}
-          title={
-            neuralVoice
-              ? "Kokoro neural voice running locally"
-              : "Using the browser voice; start the local voice service for the natural voice"
-          }
-        >
-          <span className="badge__dot" />
-          {neuralVoice ? "Neural voice" : "Browser voice"}
-        </span>
-        <span className="badge badge--muted" title="Browser speech recognition">
-          {sttSupported ? "Mic ready" : "Text only"}
-        </span>
-        {llm?.model && (
-          <span className="badge badge--muted" title="Configured local model">
-            {llm.model}
-          </span>
-        )}
+      <div className="header__center">
+        <div className={`system-pill ${llmReady ? "system-pill--ok" : "system-pill--warn"}`} title={llm?.model || "Checking local model"}>
+          <span className="system-pill__dot" />
+          <span>{llmReady ? "System ready" : llm?.reachable ? "Model needed" : "Checking system"}</span>
+        </div>
       </div>
 
       <div className="header__actions">
-        <label className="lang">
-          <span>Language</span>
-          <select
-            value={language}
-            onChange={onLanguageChange}
-            disabled={busy}
-            aria-label="Conversation language"
-          >
-            <option value="en-IN">English (India)</option>
-            <option value="hi-IN">हिंदी (India)</option>
-          </select>
-        </label>
-
-        <button
-          type="button"
-          className={`icon-btn ${voiceEnabled ? "" : "icon-btn--off"}`}
-          onClick={onToggleVoice}
-          title={voiceEnabled ? "Mute agent voice" : "Unmute agent voice"}
-          aria-label={voiceEnabled ? "Mute agent voice" : "Unmute agent voice"}
-        >
-          {voiceEnabled ? "🔊" : "🔇"}
-        </button>
-
-        <button
-          type="button"
-          className="btn btn--ghost"
-          onClick={onReset}
-          disabled={busy}
-        >
-          Reset
-        </button>
-
-        {callActive ? (
+        <label className="voice-toggle" title="Voice output">
+          <span className="voice-toggle__label">Voice</span>
           <button
             type="button"
-            className="btn btn--danger"
-            onClick={onEndCall}
-            disabled={busy}
+            role="switch"
+            aria-checked={voiceEnabled}
+            className={`switch ${voiceEnabled ? "switch--on" : ""}`}
+            onClick={onToggleVoice}
           >
+            <span className="switch__thumb" />
+          </button>
+        </label>
+
+        <div className="lang-select">
+          <select
+            className="select"
+            value={language}
+            onChange={onLanguageChange}
+            aria-label="Conversation language"
+          >
+            <option value="en-IN">English</option>
+            <option value="hi-IN">हिन्दी</option>
+          </select>
+        </div>
+
+        {callActive ? (
+          <button type="button" className="btn btn--ghost" onClick={onEndCall} disabled={busy}>
             End call
           </button>
         ) : (
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={onNewCall}
-            disabled={busy}
-          >
+          <button type="button" className="btn btn--primary" onClick={onNewCall} disabled={busy}>
             New call
           </button>
         )}
+
+        <button type="button" className="btn btn--subtle" onClick={onReset} disabled={busy} title="Clear demo data">
+          Reset
+        </button>
       </div>
+
+      {!sttSupported && (
+        <div className="header__note">
+          Voice input needs Chrome or Edge. You can still type below.
+        </div>
+      )}
     </header>
   );
 }

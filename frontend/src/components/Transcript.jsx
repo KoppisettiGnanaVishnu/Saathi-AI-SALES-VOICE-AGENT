@@ -1,26 +1,27 @@
 import { useEffect, useRef } from "react";
 
-function MessageBubble({ message }) {
+function MessageBubble({ message, onPickSlot, busy }) {
   const isUser = message.role === "user";
-  const sources = [...new Set(message.meta?.sources || [])];
-  const sentiment = message.meta?.sentiment;
-
+  const slots = !isUser ? message.meta?.slots || [] : [];
+  const booking = !isUser ? message.meta?.booking : null;
   return (
     <div className={`message ${isUser ? "message--user" : "message--agent"}`}>
-      <div className="avatar">{isUser ? "You" : "A"}</div>
       <div className="message__body">
-        <div className="bubble">{message.text}</div>
-        {(sources.length > 0 || (sentiment && !isUser)) && (
-          <div className="message__meta">
-            {sentiment && !isUser && (
-              <span className={`sentiment sentiment--${sentiment}`}>
-                {sentiment}
-              </span>
-            )}
-            {sources.map((source) => (
-              <span className="source-chip" key={source}>
-                📄 {source}
-              </span>
+        {!isUser && <div className="message__label">Saathi</div>}
+        <div className={`bubble ${message.pending ? "bubble--pending" : ""}`}>{message.text || "…"}</div>
+        {slots.length > 0 && !booking && (
+          <div className="chat-slots" aria-label="Available demo slots">
+            {slots.map((slot) => (
+              <button
+                type="button"
+                className="chat-slot"
+                key={slot.id}
+                onClick={() => onPickSlot?.(slot.id)}
+                disabled={busy}
+              >
+                <span className="chat-slot__label">{slot.label}</span>
+                <span className="chat-slot__cta">Book this slot</span>
+              </button>
             ))}
           </div>
         )}
@@ -29,59 +30,61 @@ function MessageBubble({ message }) {
   );
 }
 
-export default function Transcript({
-  messages,
-  interim,
-  busy,
-  speaking,
-  starting,
-}) {
-  const bottomRef = useRef(null);
+export default function Transcript({ messages, interim, busy, speaking, starting, onPickSlot }) {
+  const endRef = useRef(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, interim, busy, speaking]);
 
   return (
-    <div className="transcript" aria-live="polite">
-      {starting && messages.length === 0 && (
-        <div className="transcript__empty">
-          <div className="spinner" />
-          <p>Connecting to the local agent…</p>
+    <div className="transcript" role="log" aria-live="polite" aria-label="Conversation transcript">
+      {starting && (
+        <div className="empty-state">
+          <div className="empty-state__mark" aria-hidden="true" />
+          <p className="empty-state__title">Preparing Saathi</p>
+          <p className="empty-state__text">Setting up the conversation space.</p>
         </div>
       )}
 
       {!starting && messages.length === 0 && (
-        <div className="transcript__empty">
-          <p>Start by saying hello, or tap a suggestion below.</p>
+        <div className="empty-state">
+          <div className="empty-state__mark" aria-hidden="true" />
+          <p className="empty-state__title">Start the conversation</p>
+          <p className="empty-state__text">Ask about Fortivex AI, pricing, security, or book a demo.</p>
         </div>
       )}
 
       {messages.map((message) => (
-        <MessageBubble key={message.id} message={message} />
+        <MessageBubble key={message.id} message={message} onPickSlot={onPickSlot} busy={busy} />
       ))}
 
       {interim && (
-        <div className="message message--user">
-          <div className="avatar">You</div>
+        <div className="message message--user message--interim">
           <div className="message__body">
             <div className="bubble bubble--interim">{interim}</div>
           </div>
         </div>
       )}
 
-      {busy && (
-        <div className="typing">
-          <span />
-          <span />
-          <span />
-          <em>Saathi is thinking…</em>
+      {busy && messages[messages.length - 1]?.role !== "assistant" && (
+        <div className="message message--agent">
+          <div className="message__body">
+            <div className="message__label">Saathi</div>
+            <div className="bubble bubble--thinking" aria-label="Saathi is thinking">
+              <span /><span /><span />
+            </div>
+          </div>
         </div>
       )}
 
-      {speaking && <div className="speaking">🔊 Saathi is speaking…</div>}
+      {speaking && !busy && (
+        <div className="speaking-indicator" aria-label="Saathi is speaking">
+          <span /><span /><span /><span />
+        </div>
+      )}
 
-      <div ref={bottomRef} />
+      <div ref={endRef} />
     </div>
   );
 }

@@ -3,8 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import Composer from "./components/Composer";
 import Header from "./components/Header";
-import InsightsBar from "./components/InsightsBar";
 import LeadPanel from "./components/LeadPanel";
+import CrmRecords from "./components/CrmRecords";
 import SummaryPanel from "./components/SummaryPanel";
 import Transcript from "./components/Transcript";
 import { useSpeechRecognition } from "./hooks/useSpeechRecognition";
@@ -14,7 +14,7 @@ const STAGE_LABELS = {
   greeting: "Greeting",
   discovery: "Discovery",
   qualification: "Qualification",
-  objection_handling: "Objection handling",
+  objection_handling: "Handling objections",
   booking: "Booking",
   closing: "Closing",
   closed: "Closed",
@@ -34,16 +34,17 @@ export default function App() {
   const [sentiment, setSentiment] = useState("neutral");
   const [stage, setStage] = useState("greeting");
   const [booking, setBooking] = useState(null);
+  const prevBookingRef = useRef(null);
   const [slots, setSlots] = useState([]);
   const [knowledgeUsed, setKnowledgeUsed] = useState([]);
   const [crmSyncedAt, setCrmSyncedAt] = useState(null);
+  const [crmRefresh, setCrmRefresh] = useState(0);
   const [language, setLanguage] = useState("en-IN");
   const [busy, setBusy] = useState(false);
   const [starting, setStarting] = useState(true);
   const [callActive, setCallActive] = useState(false);
   const [error, setError] = useState("");
   const [summary, setSummary] = useState(null);
-  const [insights, setInsights] = useState(null);
   const [health, setHealth] = useState(null);
   const [text, setText] = useState("");
   const [toast, setToast] = useState("");
@@ -58,7 +59,6 @@ export default function App() {
     speaking,
     enabled: voiceEnabled,
     setEnabled: setVoiceEnabled,
-    engine: voiceEngine,
     prewarm,
   } = useSpeechSynthesis();
 
@@ -87,13 +87,7 @@ export default function App() {
     if (data.crm_synced_at) setCrmSyncedAt(data.crm_synced_at);
   }, []);
 
-  const refreshInsights = useCallback(async () => {
-    try {
-      setInsights(await api.insights());
-    } catch {
-      // insights are non-critical
-    }
-  }, []);
+
 
   const refreshHealth = useCallback(async () => {
     try {
@@ -151,9 +145,8 @@ export default function App() {
     if (startedRef.current) return;
     startedRef.current = true;
     startSession();
-    refreshInsights();
     refreshHealth();
-  }, [refreshHealth, refreshInsights, startSession]);
+  }, [refreshHealth, startSession]);
 
   useEffect(() => {
     prewarm(language);
@@ -227,13 +220,16 @@ export default function App() {
                     sentiment: data.sentiment,
                     stage: data.stage,
                     sources: data.knowledge_used,
+                    slots: data.booking ? [] : data.available_slots || [],
+                    booking: data.booking || null,
                   },
                 }
               : msg,
           ),
         );
-        if (data.booking) setToast(`Demo booked · ${data.booking.label}`);
-        refreshInsights();
+        const newBooking = data.booking && !prevBookingRef.current;
+        if (newBooking) { setToast(`Demo booked · ${data.booking.label}`); setCrmRefresh((v) => v + 1); }
+        prevBookingRef.current = data.booking || prevBookingRef.current;
       } catch (err) {
         setMessages((previous) =>
           previous.filter((msg) => !(msg.id === assistantId && !msg.text)),
@@ -250,7 +246,6 @@ export default function App() {
       cancelSpeech,
       enqueueSpeech,
       language,
-      refreshInsights,
       sessionId,
       stage,
       stopListening,
@@ -278,12 +273,17 @@ export default function App() {
             id: uid(),
             role: "assistant",
             text: data.reply,
-            meta: { stage: data.stage, sources: [] },
+            meta: {
+              stage: data.stage,
+              sources: [],
+              slots: data.booking ? [] : data.available_slots || [],
+              booking: data.booking || null,
+            },
           },
         ]);
-        if (data.booking) setToast(`Demo booked · ${data.booking.label}`);
-        refreshInsights();
-        speak(data.reply, language);
+        if (data.booking) { setToast(`Demo booked · ${data.booking.label}`); setCrmRefresh((v) => v + 1); }
+        prevBookingRef.current = data.booking || prevBookingRef.current;
+          speak(data.reply, language);
       } catch (err) {
         setError(err.message || "Could not book that slot.");
       } finally {
@@ -296,7 +296,6 @@ export default function App() {
       busy,
       cancelSpeech,
       language,
-      refreshInsights,
       sessionId,
       speak,
       stopListening,
@@ -314,7 +313,7 @@ export default function App() {
       const data = await api.endCall(sessionId);
       setSummary(data);
       setCallActive(false);
-      refreshInsights();
+      setCrmRefresh((v) => v + 1);
     } catch (err) {
       setError(err.message || "Could not generate the call summary.");
     } finally {
@@ -324,7 +323,6 @@ export default function App() {
     busy,
     callActive,
     cancelSpeech,
-    refreshInsights,
     sessionId,
     stopListening,
   ]);
@@ -333,8 +331,7 @@ export default function App() {
     cancelSpeech();
     stopListening();
     startSession({ announce: true });
-    refreshInsights();
-  }, [cancelSpeech, refreshInsights, startSession, stopListening]);
+  }, [cancelSpeech, startSession, stopListening]);
 
   const handleReset = useCallback(async () => {
     if (busy) return;
@@ -350,7 +347,6 @@ export default function App() {
       stopListening();
       await api.reset();
       await startSession({ announce: true });
-      await refreshInsights();
       setToast("Demo data cleared");
     } catch (err) {
       setError(err.message || "Could not reset the demo.");
@@ -358,7 +354,6 @@ export default function App() {
   }, [
     busy,
     cancelSpeech,
-    refreshInsights,
     startSession,
     stopListening,
   ]);
@@ -406,96 +401,112 @@ export default function App() {
     [language],
   );
 
+  const [introVisible, setIntroVisible] = useState(true);
+  useEffect(() => {
+    const t = setTimeout(() => setIntroVisible(false), 3400);
+    return () => clearTimeout(t);
+  }, []);
+
   return (
     <div className="app">
-      <Header
-        health={health}
-        callActive={callActive}
-        busy={busy || starting}
-        onEndCall={handleEndCall}
-        onNewCall={handleNewCall}
-        onReset={handleReset}
-        language={language}
-        onLanguageChange={handleLanguageChange}
-        voiceEnabled={voiceEnabled}
-        onToggleVoice={() => setVoiceEnabled((value) => !value)}
-        sttSupported={sttSupported}
-        voiceEngine={voiceEngine}
-        voiceAvailable={health?.voice?.reachable}
-      />
-
-      <InsightsBar insights={insights} />
-
-      <main className="workspace">
-        <section className="call-card">
-          <div className="call-card__top">
-            <div className={`live ${callActive ? "live--on" : ""}`}>
-              <span className="live__dot" />
-              {callActive ? "Live call" : "Call ended"}
-            </div>
-            <div className="call-card__meta">
-              <span className={`pill pill--${leadStatus}`}>{leadStatus}</span>
-              <span className="pill pill--stage">
-                {STAGE_LABELS[stage] || stage}
-              </span>
-              <span className={`pill pill--sentiment-${sentiment}`}>
-                {sentiment}
-              </span>
-            </div>
+      {introVisible && (
+        <div className="intro" aria-hidden="true">
+          <div className="intro__bg">
+            <div className="intro__orb intro__orb--a" />
+            <div className="intro__orb intro__orb--b" />
+            <div className="intro__grid" />
           </div>
+          <div className="intro__inner">
+            <p className="intro__eyebrow">Fortivex AI</p>
+            <h1 className="intro__wordmark">Saathi</h1>
+            <p className="intro__tagline">A companion for business conversations</p>
+            <div className="intro__line"><span /></div>
+          </div>
+        </div>
+      )}
 
-          <Transcript
-            messages={messages}
-            interim={interim}
-            busy={busy}
-            speaking={speaking}
-            starting={starting}
-          />
-
-          {error && (
-            <div className="error-banner">
-              <span>{error}</span>
-              <button type="button" onClick={() => setError("")}>
-                ✕
-              </button>
-            </div>
-          )}
-          {speechError && <div className="hint-banner">{speechError}</div>}
-
-          <Composer
-            text={text}
-            setText={setText}
-            onSend={sendMessage}
-            onMic={toggleMic}
-            listening={listening}
-            interim={interim}
-            busy={busy}
-            speaking={speaking}
-            sttSupported={sttSupported}
-            quickPrompts={quickPrompts}
-            callActive={callActive}
-          />
-        </section>
-
-        <LeadPanel
-          lead={lead}
-          score={leadScore}
-          status={leadStatus}
-          sentiment={sentiment}
-          stage={stage}
-          booking={booking}
-          slots={slots}
-          knowledgeUsed={knowledgeUsed}
-          crmSyncedAt={crmSyncedAt}
-          busy={busy}
-          onBookSlot={handleBookSlot}
+      <div className="shell">
+        <Header
+          health={health}
+          callActive={callActive}
+          busy={busy || starting}
+          onEndCall={handleEndCall}
+          onNewCall={handleNewCall}
+          onReset={handleReset}
+          language={language}
+          onLanguageChange={handleLanguageChange}
+          voiceEnabled={voiceEnabled}
+          onToggleVoice={() => setVoiceEnabled((value) => !value)}
+          sttSupported={sttSupported}
         />
-      </main>
 
-      <footer className="footer">
-        <span>100% open-source MVP · local LLM · browser voice</span>
-        <span>Fortivex AI · Round 3 project challenge</span>
-      </footer>
+        <main className="workspace">
+          <section className="call-card" aria-label="Conversation">
+            <div className="call-card__top">
+              <div className="call-card__status">
+                <div className={`live ${callActive ? "live--on" : ""}`}>
+                  <span className="live__dot" />
+                  {callActive ? "Live conversation" : "Conversation ended"}
+                </div>
+                <p className="call-card__stage">{STAGE_LABELS[stage] || stage}</p>
+              </div>
+              <div className="call-card__meta">
+                <span className={`signal signal--${sentiment}`}>{sentiment}</span>
+                <span className="signal signal--neutral">{language === "hi-IN" ? "Hindi" : "English"}</span>
+              </div>
+            </div>
+
+            <Transcript
+              messages={messages}
+              interim={interim}
+              busy={busy}
+              speaking={speaking}
+              starting={starting}
+              onPickSlot={handleBookSlot}
+            />
+
+            {error && (
+              <div className="notice notice--error" role="status">
+                <span>{error}</span>
+                <button type="button" className="notice__close" onClick={() => setError("")} aria-label="Dismiss error">
+                  ×
+                </button>
+              </div>
+            )}
+            {speechError && <div className="notice notice--hint" role="status">{speechError}</div>}
+
+            <Composer
+              text={text}
+              setText={setText}
+              onSend={sendMessage}
+              onMic={toggleMic}
+              listening={listening}
+              interim={interim}
+              busy={busy}
+              speaking={speaking}
+              sttSupported={sttSupported}
+              quickPrompts={quickPrompts}
+              callActive={callActive}
+            />
+          </section>
+
+          <LeadPanel
+            lead={lead}
+            score={leadScore}
+            status={leadStatus}
+            sentiment={sentiment}
+            stage={stage}
+            booking={booking}
+            slots={slots}
+            knowledgeUsed={knowledgeUsed}
+            crmSyncedAt={crmSyncedAt}
+            busy={busy}
+            onBookSlot={handleBookSlot}
+          />
+        </main>
+      </div>
+
+      <CrmRecords refreshKey={crmRefresh} />
 
       {summary && (
         <SummaryPanel
@@ -505,7 +516,7 @@ export default function App() {
         />
       )}
 
-      {toast && <div className="toast">{toast}</div>}
+      {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );
 }
