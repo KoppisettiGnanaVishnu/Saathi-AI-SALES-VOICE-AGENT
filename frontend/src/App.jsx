@@ -85,6 +85,7 @@ export default function App() {
     if (Array.isArray(data.available_slots)) setSlots(data.available_slots);
     if (Array.isArray(data.knowledge_used)) setKnowledgeUsed(data.knowledge_used);
     if (data.crm_synced_at) setCrmSyncedAt(data.crm_synced_at);
+    setCrmRefresh((v) => v + 1);
   }, []);
 
 

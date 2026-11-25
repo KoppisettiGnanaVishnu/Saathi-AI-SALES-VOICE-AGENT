@@ -50,7 +50,7 @@ export default function CrmRecords({ refreshKey }) {
                       {l.company ? ` · ${l.company}` : ""}
                       <div className="crm-records__meta">
                         Score {l.score} · {l.status} · {l.stage}
-                        {l.call_volume ? ` · ${l.call_volume} calls` : ""}
+                        {l.call_volume ? ` · ${l.call_volume}` : ""}
                       </div>
                     </li>
                   ))}
