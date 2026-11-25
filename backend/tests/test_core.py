@@ -4,6 +4,7 @@ from datetime import datetime
 
 from app import config, db, slots
 from app.agent import (
+    SalesAgent,
     _advance_stage,
     _clean_updates,
     _extract_lead_facts,
@@ -153,3 +154,44 @@ def test_booking_prevents_double_booking(tmp_path, monkeypatch):
     assert db.book_appointment("session-1", slot["id"], slot["iso"]) is True
     assert db.book_appointment("session-2", slot["id"], slot["iso"]) is False
     assert slot["iso"] in db.list_booked_slot_isos()
+
+
+class _FakeLLM:
+    def chat(self, messages, temperature=0.2, response_format=None):  # noqa: ARG002
+        return "{}"
+
+    def chat_json(self, messages, temperature=0.2, num_predict=420):  # noqa: ARG002
+        return None
+
+    def chat_stream(self, messages, temperature=0.2):  # noqa: ARG002
+        yield ""
+
+    def embed(self, text):  # noqa: ARG002
+        return None
+
+
+def test_booking_flow_requires_identity_then_offers_slots(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "booking.db")
+    monkeypatch.setattr(config, "USE_EMBEDDINGS", False)
+    monkeypatch.setattr("app.agent.OllamaClient", lambda: _FakeLLM())
+    db.init_db()
+
+    agent = SalesAgent()
+    session = agent.create_session()
+    sid = session["session_id"]
+
+    r1 = agent.handle_message(sid, "I want to book a demo", "en-IN")
+    assert r1["booking"] is None
+    assert "name and company" in r1["reply"].lower()
+    assert not r1["available_slots"]
+
+    r2 = agent.handle_message(sid, "My name is Vishnu and I work at Acme", "en-IN")
+    assert r2["booking"] is None
+    assert r2["available_slots"]
+    assert "pick a time" in r2["reply"].lower()
+
+    slot_id = r2["available_slots"][0]["id"]
+    r3 = agent.book_slot(sid, slot_id)
+    assert r3["booking"] is not None
+    assert r3["booking"]["id"] == slot_id
+    assert "booked" in r3["reply"].lower()

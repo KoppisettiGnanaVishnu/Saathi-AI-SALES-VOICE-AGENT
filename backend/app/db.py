@@ -252,6 +252,22 @@ def get_call(session_id: str) -> dict[str, Any] | None:
     return data
 
 
+def list_calls(limit: int = 50) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM calls ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    result = []
+    for row in rows:
+        data = dict(row)
+        try:
+            data["summary"] = json.loads(data.pop("summary_json"))
+        except (json.JSONDecodeError, TypeError):
+            data["summary"] = {}
+        result.append(data)
+    return result
+
+
 def insights() -> dict[str, Any]:
     with _connect() as conn:
         lead_row = conn.execute(

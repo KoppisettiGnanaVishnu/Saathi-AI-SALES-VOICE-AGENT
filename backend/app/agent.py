@@ -223,6 +223,17 @@ def _is_bad_reply(reply: str, user_message: str) -> bool:
         return True
     if clean.rstrip(".!?") == user.rstrip(".!?"):
         return True
+    # Detect Hindi/Devanagari leakage in an English reply (language mismatch)
+    if not any(ord(c) > 0x0900 and ord(c) < 0x097F for c in user) and any(
+        ord(c) > 0x0900 and ord(c) < 0x097F for c in clean
+    ):
+        return True
+    # Detect glossary-style example lists (e.g. "phrase — translation")
+    if clean.count(" — ") >= 2 or clean.count("  ") >= 3 and "—" in clean:
+        return True
+    # Detect when reply is just echoing example questions
+    if "कीमत क्या है" in clean or "प्लान क्या हैं" in clean or "डेमो बुक" in clean:
+        return True
     if user and len(user) > 12 and user in clean and len(clean) < len(user) + 20:
         return True
     return False
@@ -524,7 +535,7 @@ def _extract_lead_facts(text: str) -> dict[str, str]:
     volume = re.search(
         r"\b(?:around|about|roughly|approx(?:\.|imately)?|nearly)?\s*"
         r"(\d[\d,]*(?:\.\d+)?(?:\s*[km])?)\s*"
-        r"(?:calls?|conversations?|leads?)\s*"
+        r"(?:calls?|conversations?|leads?)?\s*"
         r"(?:per|a|each|/)?\s*"
         r"(?:day|week|month|year|daily|weekly|monthly|yearly)?\b",
         lower,
@@ -605,6 +616,7 @@ class Session:
     last_sentiment_score: float = 0.0
     booking: dict[str, str] | None = None
     offered_slots: list[dict[str, str]] = field(default_factory=list)
+    pending_booking: bool = False
     knowledge_used: list[str] = field(default_factory=list)
     turns: int = 0
     language: str = "en-IN"
@@ -664,7 +676,7 @@ class SalesAgent:
             "sentiment_score": session.last_sentiment_score,
             "stage": session.stage,
             "booking": session.booking,
-            "available_slots": get_available_slots(limit=6),
+            "available_slots": get_available_slots(limit=6) if session.offered_slots else [],
             "knowledge_used": session.knowledge_used,
             "turns": session.turns,
             "crm_synced_at": lead_row.get("crm_synced_at"),
@@ -873,7 +885,8 @@ Only fill lead_updates with NEW information the customer stated. Use null for ev
                 "stock", "bitcoin",
             )
         )
-        fortivex_related = any(k in lower for k in domain_keywords)
+        fact_hints = _extract_lead_facts(message)
+        fortivex_related = any(k in lower for k in domain_keywords) or bool(fact_hints)
         short_contextual = bool(re.fullmatch(r"[\d,.\sKkMm+]+(calls?|calls? per (day|week|month|year)|per (day|week|month|year))?", lower.strip()))
         has_sales_context = bool(session.history) or any(session.lead.get(k) for k in ("need", "budget", "timeline", "call_volume", "company"))
         force_fallback = out_of_scope or (not fortivex_related and not (short_contextual and has_sales_context))
@@ -992,11 +1005,12 @@ Only fill lead_updates with NEW information the customer stated. Use null for ev
         # Model extraction first, then deterministic facts for explicit statements.
         cleaned_updates = _clean_updates(data.get("lead_updates"))
         # Prevent slot-selection numbers from clobbering call volume
-        if re.fullmatch(r"\s*[1-4]\s*", (message or "").strip()) and (session.booking or session.offered_slots):
+        is_slot_pick = bool(re.fullmatch(r"\s*[1-4]\s*", (message or "").strip()) and (session.booking or session.offered_slots))
+        if is_slot_pick:
             cleaned_updates.pop("call_volume", None)
         session.lead.update(cleaned_updates)
         for key, value in _extract_lead_facts(message).items():
-            if key == "call_volume" and re.fullmatch(r"\s*[1-4]\s*", (message or "").strip()) and (session.booking or session.offered_slots):
+            if key == "call_volume" and is_slot_pick:
                 continue
             if value:
                 session.lead[key] = value
@@ -1011,22 +1025,52 @@ Only fill lead_updates with NEW information the customer stated. Use null for ev
 
         booking = None
         slot = self._resolve_slot(data.get("action"), session, slots)
+        wants_booking = _wants_booking(message)
+        has_identity = bool(session.lead.get("name") and session.lead.get("company"))
+        booking_gate = wants_booking and not has_identity and not session.booking
+
+        # Only accept a slot if user explicitly picked from offered slots or named a slot.
+        if slot and not session.booking:
+            offered_ids = {s["id"] for s in (session.offered_slots or [])}
+            lower_msg = (message or "").lower()
+            picked_explicit = bool(re.fullmatch(r"\s*[1-4]\s*", (message or "").strip())) or any(s["label"].lower() in lower_msg for s in slots) or any(s["id"] in (message or "") for s in slots)
+            if slot["id"] not in offered_ids and not picked_explicit:
+                slot = None
+
         if (
             slot is None
             and _is_affirmative(message)
-            and (session.offered_slots or _wants_booking(message))
+            and session.offered_slots
             and not session.booking
+            and not wants_booking
         ):
-            if session.offered_slots:
-                slot = session.offered_slots[0]
-            elif slots:
-                slot = slots[0]
+            slot = session.offered_slots[0]
+
+        # Don't auto-book on first "book a demo" if we don't know who they are.
+        if booking_gate:
+            slot = None
+            stage = "qualification"
+            intent = "booking"
+            session.pending_booking = True
+            prompt = "Before I book that, may I have your name and company name?"
+            if language.lower().startswith("hi"):
+                prompt = "डेमो बुक करने से पहले, क्या आप अपना नाम और कंपनी का नाम बता सकते हैं?"
+            reply = prompt
+            session.offered_slots = []
+        elif (wants_booking or session.pending_booking) and has_identity and not session.booking:
+            session.pending_booking = False
+            session.offered_slots = slots[:4]
+            stage = "booking"
+            intent = "booking"
+            slot = None
+            reply = "Great. Please pick a time that works for you from the available demo slots below." if not language.lower().startswith("hi") else "बहुत बढ़िया। नीचे उपलब्ध डेमो स्लॉट में से आपके लिए सही समय चुनें।"
 
         if slot and not session.booking:
             booking = self._book(session, slot)
             if booking:
                 stage = "closing"
                 session.offered_slots = []
+                session.pending_booking = False
                 confirmation = _booking_confirmation(
                     session.lead.get("name"), booking["label"], language
                 )
@@ -1041,7 +1085,7 @@ Only fill lead_updates with NEW information the customer stated. Use null for ev
                 )
                 stage = "booking"
 
-        if stage == "booking" and not session.booking:
+        if stage == "booking" and not session.booking and not session.offered_slots:
             session.offered_slots = slots[:4]
 
         stage = _advance_stage(
@@ -1159,10 +1203,9 @@ Only fill lead_updates with NEW information the customer stated. Use null for ev
         if not booked:
             raise ValueError("That slot is no longer available. Please pick another.")
 
-        reply = (
-            f"Great, I've booked {booked['label']} for your demo. "
-            "A confirmation will be sent to you."
-        )
+        session.offered_slots = []
+        session.pending_booking = False
+        reply = _booking_confirmation(session.lead.get("name"), booked["label"], session.language)
         session.history.append({"role": "assistant", "content": reply})
         score = compute_score(session.lead, session.last_sentiment_score)
         status = lead_status(score)
@@ -1420,11 +1463,11 @@ CALL LANGUAGE: {"Hindi (write every value in Devanagari Hindi)" if session.langu
             }
 
         # Booking intent / confirmation
-        if session.booking and (re.fullmatch(r"\s*[1-4]\s*", lower) or any(k in lower for k in ("booked", "booking", "what did i book", "what did i just book", "my demo", "appointment", "just book"))):
+        if session.booking and (re.fullmatch(r"\s*[1-4]\s*", lower) or any(k in lower for k in ("booked", "booking", "what did i book", "what did i just book", "my demo", "appointment", "just book", "book demo", "book a demo", "schedule", "slot"))):
             b = session.booking
             return say(
-                f"You booked a 30-minute Fortivex AI demo for {b['label']}. A confirmation will be sent to you. Would you like tips on what to prepare for the call?",
-                f"आपने {b['label']} के लिए 30 मिनट का Fortivex AI demo बुक किया है। पुष्टि भेज दी जाएगी। क्या आप call की तैयारी के tips चाहेंगे?",
+                f"Your 30-minute Fortivex AI demo is already booked for {b['label']}. If you want, I can share what to prepare before the call.",
+                f"आपका 30 मिनट का Fortivex AI डेमो पहले से {b['label']} के लिए बुक है। अगर चाहें, मैं call से पहले की तैयारी बता सकती/सकता हूँ।",
                 "closing",
             )
         if session.offered_slots and _is_affirmative(text):
@@ -1438,12 +1481,18 @@ CALL LANGUAGE: {"Hindi (write every value in Devanagari Hindi)" if session.langu
                     f"आपका 30 मिनट का demo {b['label']} के लिए बुक है। मैं बता सकती/सकता हूँ कि call के लिए क्या तैयार रखें।",
                     "closing",
                 )
-            if slots:
-                session.offered_slots = slots[:3]
-                slot_text = ", ".join(slot["label"] for slot in slots[:3])
+            has_identity = bool(session.lead.get("name") and session.lead.get("company"))
+            if not has_identity:
                 return say(
-                    f"Sure, I can help with that. I can book a 30-minute demo. Available slots are {slot_text}. Which one works best for you?",
-                    f"जी, मैं इसमें मदद कर सकती/सकता हूँ। मैं 30 मिनट का डेमो बुक कर सकती/सकता हूँ। उपलब्ध स्लॉट हैं: {slot_text}। आपके लिए कौन सा सही रहेगा?",
+                    "I can book a 30-minute Fortivex AI demo for you. Before I show available slots, may I have your name and company name?",
+                    "मैं आपके लिए 30 मिनट का Fortivex AI डेमो बुक कर सकती/सकता हूँ। उपलब्ध स्लॉट दिखाने से पहले, क्या आप अपना नाम और कंपनी का नाम बता सकते हैं?",
+                    "qualification",
+                )
+            if slots:
+                session.offered_slots = slots[:4]
+                return say(
+                    "Great. Please pick a time that works for you from the available demo slots below.",
+                    "बहुत बढ़िया। नीचे उपलब्ध डेमो स्लॉट में से आपके लिए सही समय चुनें।",
                     "booking",
                 )
             return say(
@@ -1560,6 +1609,29 @@ CALL LANGUAGE: {"Hindi (write every value in Devanagari Hindi)" if session.langu
                 "objection_handling",
             )
 
+        # Name/company capture: respond naturally and ask next discovery question
+        if updates.get("name") or updates.get("company"):
+            name = updates.get("name") or session.lead.get("name")
+            company = updates.get("company") or session.lead.get("company")
+            if name and not company:
+                return say(
+                    f"Nice to meet you, {name}! Which company are you representing, and how many inbound sales calls do you handle each month?",
+                    f"Nice to meet you, {name}! आप किस company से हैं, और आप हर महीने कितनी inbound sales calls handle करते हैं?",
+                    "discovery",
+                )
+            if name and company:
+                return say(
+                    f"Nice to meet you, {name}! I see you're from {company}. How many inbound sales calls do you handle each month?",
+                    f"Nice to meet you, {name}! आप {company} से हैं। आप हर महीने कितनी inbound sales calls handle करते हैं?",
+                    "discovery",
+                )
+            if company and not name:
+                return say(
+                    f"Got it, {company}. Could you share your name, and how many inbound sales calls do you handle each month?",
+                    f"समझ गया, {company}। क्या आप अपना नाम बता सकते हैं, और आप हर महीने कितनी inbound sales calls handle करते हैं?",
+                    "discovery",
+                )
+
         # Out-of-scope / unknown: no guessing
         domain_keywords = ("fortivex", "saathi", "price", "pricing", "cost", "plan", "demo", "security", "crm", "integration", "call", "sales", "lead", "booking", "setup", "onboard", "pilot", "chatbot", "ai", "human", "voice", "agent", "summary", "insight", "sentiment", "qualification", "multilingual", "hindi", "english")
         out_of_scope = any(k in lower for k in ("weather", "news", "ipl", "cricket", "recipe", "python script", "scrape linkedin", "linkedin leads", "homework", "movie", "song", "stock", "bitcoin"))
@@ -1590,6 +1662,9 @@ CALL LANGUAGE: {"Hindi (write every value in Devanagari Hindi)" if session.langu
         if retrieved:
             parts: list[str] = []
             for chunk in retrieved[:2]:
+                # Skip glossary files — they contain example phrases, not answers
+                if "glossary" in (chunk.get("source") or "").lower():
+                    continue
                 textc = chunk.get("text", "")
                 lines = [re.sub(r"\s+", " ", ln.strip("#- *").strip()) for ln in textc.split("\n") if ln.strip()]
                 for line in lines:
@@ -1597,6 +1672,9 @@ CALL LANGUAGE: {"Hindi (write every value in Devanagari Hindi)" if session.langu
                         continue
                     low = line.lower()
                     if low.startswith("product —") or low.startswith("company —") or low == (chunk.get("heading", "").lower()):
+                        continue
+                    # Skip glossary-style "phrase — translation" lines
+                    if " — " in line:
                         continue
                     parts.append(line)
                     if len(" ".join(parts)) > 260:

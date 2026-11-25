@@ -180,6 +180,11 @@ def appointments() -> dict[str, Any]:
     return {"appointments": db.list_appointments(limit=50)}
 
 
+@app.get("/api/calls")
+def calls() -> dict[str, Any]:
+    return {"calls": db.list_calls(limit=50)}
+
+
 @app.get("/api/insights")
 def insights() -> dict[str, Any]:
     return get_agent().insights()
