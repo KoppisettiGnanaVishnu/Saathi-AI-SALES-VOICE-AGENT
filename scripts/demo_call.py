@@ -48,7 +48,7 @@ def main() -> None:
         session_id = data["session_id"]
 
         print(f"SESSION {session_id}")
-        print(f"Mira: {data['greeting']}\n")
+        print(f"Saathi: {data['greeting']}\n")
 
         for message in turns:
             print(f"Customer: {message}")
@@ -62,7 +62,7 @@ def main() -> None:
             )
             response.raise_for_status()
             result = response.json()
-            print(f"Mira: {result['reply']}")
+            print(f"Saathi: {result['reply']}")
             print(
                 f"  score={result['lead_score']} status={result['lead_status']} "
                 f"stage={result['stage']} sentiment={result['sentiment']} "

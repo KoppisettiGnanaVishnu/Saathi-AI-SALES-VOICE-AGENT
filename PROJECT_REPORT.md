@@ -1,4 +1,4 @@
-# Project Report — Mira, Autonomous AI Sales Voice Agent
+# Project Report — Saathi: A Companion for Business Conversations
 
 **Author:** Koppisetti Gnana Vishnu · **Programme:** Fortivex AI, Round 3 · **Status:** working local MVP
 

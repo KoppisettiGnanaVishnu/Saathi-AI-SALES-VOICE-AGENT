@@ -1,6 +1,6 @@
-# Mira — Autonomous AI Sales Voice Agent
+# Saathi — A Companion for Business Conversations
 
-**Mira** is the assistant persona: a warm, concise, multilingual sales development representative for Fortivex AI. She runs the full first-line sales conversation locally, with no paid APIs.
+**Saathi** (Hindi for *companion*) is the voice persona of this project: a warm, natural, multilingual sales companion for Fortivex AI. She runs the full first-line sales conversation locally, with no paid APIs, and speaks in a generated neural voice instead of a system robot voice.
 
 A working, end-to-end MVP of an autonomous AI sales voice agent built entirely with free and open-source software. The agent holds a real-time voice conversation, answers questions from a company knowledge base with RAG, qualifies the lead, tracks sentiment, books a demo, writes to a CRM-style store, and produces a post-call summary with business insights.
 
@@ -107,7 +107,7 @@ backend/.venv/bin/python scripts/demo_call.py --language hi-IN
 
 ## 4. Demo flow
 
-1. Click **Start call**. Mira greets you by voice.
+1. Click **Start call**. Saathi greets you by voice.
 2. Say: *“Hi, I’m Priya from Acme Retail. We need an AI agent to handle inbound sales calls.”*
 3. Ask: *“What does it cost?”* — the answer is retrieved from `data/knowledge/03-pricing.md`.
 4. Say: *“We have a budget of around $2,000 per month and want to launch in 3 weeks. I’m the head of sales.”* — the lead score jumps to Hot and the stage advances.

@@ -42,3 +42,8 @@ CORS_ORIGINS = [
 ]
 
 ALLOW_DEMO_RESET = _env_bool("ALLOW_DEMO_RESET", True)
+
+# Local neural voice service (Kokoro-82M). Optional: the UI falls back to the
+# browser voice if it is not running.
+TTS_URL = os.getenv("TTS_URL", "http://127.0.0.1:8100").rstrip("/")
+TTS_ENABLED = _env_bool("TTS_ENABLED", True)

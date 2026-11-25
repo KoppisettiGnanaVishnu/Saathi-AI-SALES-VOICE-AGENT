@@ -75,11 +75,11 @@ export default function Transcript({
           <span />
           <span />
           <span />
-          <em>Mira is thinking…</em>
+          <em>Saathi is thinking…</em>
         </div>
       )}
 
-      {speaking && <div className="speaking">🔊 Mira is speaking…</div>}
+      {speaking && <div className="speaking">🔊 Saathi is speaking…</div>}
 
       <div ref={bottomRef} />
     </div>

@@ -20,9 +20,9 @@ export default function Composer({
   } else if (listening) {
     hint = "Listening — speak, then pause. Your words appear above.";
   } else if (speaking) {
-    hint = "Mira is speaking. Click the mic to interrupt.";
+    hint = "Saathi is speaking. Click the mic to interrupt.";
   } else if (busy) {
-    hint = "Mira is thinking…";
+    hint = "Saathi is thinking…";
   } else if (!callActive) {
     hint = "This call has ended. Start a new call to continue.";
   }

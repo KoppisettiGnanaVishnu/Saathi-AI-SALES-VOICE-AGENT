@@ -164,26 +164,36 @@ def _source_boost(query_tokens: set[str], source: str) -> float:
     source_lower = source.lower()
     boost = 0.0
 
-    if query_tokens & {"pricing", "price", "cost", "costs", "plan", "plans", "quote"}:
+    if query_tokens & {"pricing", "price", "cost", "costs", "plan", "plans", "quote", "starter", "growth", "enterprise"}:
         if "pricing" in source_lower:
-            boost += 1.5
-    if query_tokens & {
-        "security",
-        "secure",
-        "privacy",
-        "compliance",
-        "gdpr",
-        "dpdp",
-        "hipaa",
-    }:
+            boost += 1.7
+        if "recruiter-test" in source_lower:
+            boost += 0.8
+    if query_tokens & {"security", "secure", "privacy", "compliance", "gdpr", "dpdp", "hipaa", "data"}:
         if "security" in source_lower:
-            boost += 1.5
+            boost += 1.7
+        if "recruiter-test" in source_lower:
+            boost += 0.6
     if query_tokens & {"demo", "book", "booking", "appointment", "schedule", "meeting"}:
         if "faq" in source_lower or "product" in source_lower:
             boost += 0.5
-    if query_tokens & {"integration", "integrations", "crm", "calendar", "telephony"}:
+        if "recruiter-test" in source_lower:
+            boost += 0.6
+    if query_tokens & {"integration", "integrations", "crm", "calendar", "telephony", "hubspot", "salesforce"}:
         if "product" in source_lower or "faq" in source_lower:
+            boost += 0.7
+        if "recruiter-test" in source_lower:
+            boost += 0.6
+    if query_tokens & {"setup", "onboarding", "timeline", "weeks", "pilot"}:
+        if "faq" in source_lower or "pricing" in source_lower:
+            boost += 0.6
+        if "recruiter-test" in source_lower:
             boost += 0.5
+    if query_tokens & {"different", "chatbot", "human", "ai"}:
+        if "company" in source_lower or "product" in source_lower or "objections" in source_lower:
+            boost += 0.6
+        if "recruiter-test" in source_lower:
+            boost += 0.6
     return boost
 
 
@@ -262,7 +272,7 @@ class KnowledgeBase:
                 if norm > 0:
                     query_vector = query_vector / norm
                     scores = self.vectors @ query_vector
-                    order = np.argsort(scores)[::-1][:k]
+                    order = np.argsort(scores)[::-1][: max(k * 3, k)]
                     query_tokens = set(_tokenize(query))
                     results = [
                         {
@@ -281,12 +291,17 @@ class KnowledgeBase:
                         for index in order
                     ]
                     results.sort(key=lambda item: item["score"], reverse=True)
-                    if results and results[0]["score"] >= 0.2:
-                        return results
+                    filtered = [r for r in results if r["score"] >= 0.24]
+                    if filtered:
+                        top = filtered[0]["score"]
+                        return [r for r in filtered if r["score"] >= top - 0.08][:k]
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Embedding search failed; using keyword search: %s", exc)
 
-        return self._keyword_search(query, k)
+        keyword = self._keyword_search(query, k)
+        if keyword and keyword[0]["score"] < 0.35:
+            return []
+        return keyword
 
     @staticmethod
     def format_context(results: list[dict[str, Any]]) -> str:

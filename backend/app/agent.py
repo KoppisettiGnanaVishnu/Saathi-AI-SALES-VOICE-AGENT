@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import config, db
-from .llm import LLMError, OllamaClient
+from .llm import LLMError, OllamaClient, extract_json
 from .rag import KnowledgeBase
 from .slots import find_available_slot, get_available_slots
 
@@ -37,7 +37,7 @@ STAGES = [
     "closing",
 ]
 
-AGENT_NAME = "Mira"
+AGENT_NAME = "Saathi"
 
 GREETING = (
     f"Hi, I'm {AGENT_NAME}, an AI sales assistant from Fortivex AI. I help teams "
@@ -213,6 +213,94 @@ def _booking_confirmation(name: str | None, label: str, language: str) -> str:
         "A confirmation will be sent to you. Is there anything you'd like "
         "me to include in the invite?"
     )
+
+
+class _ReplyExtractor:
+    """Pull the ``reply`` string out of a streaming JSON object, sentence by sentence.
+
+    Ollama streams the JSON object token by token. Waiting for the closing brace
+    means the customer hears nothing until the model has also written the lead
+    score, sentiment and CRM fields. This class decodes the JSON string as it
+    arrives so each finished sentence can be spoken immediately.
+    """
+
+    _ESCAPES = {"n": " ", "t": " ", "r": " ", "b": " ", "f": " "}
+
+    def __init__(self) -> None:
+        self.buffer = ""
+        self.text = ""
+        self.index: int | None = None
+        self.done = False
+        self._flushed = False
+        self._boundary_pending = False
+
+    def feed(self, delta: str) -> list[str]:
+        sentences: list[str] = []
+        if self.done or not delta:
+            return sentences
+
+        self.buffer += delta
+        if self.index is None:
+            match = re.search(r'"reply"\s*:\s*"', self.buffer)
+            if not match:
+                return sentences
+            self.index = match.end()
+
+        index = self.index
+        if self._boundary_pending and index < len(self.buffer):
+            self._boundary_pending = False
+            if self.buffer[index] in " \n":
+                sentence = self.text.strip()
+                if sentence:
+                    sentences.append(sentence)
+                self.text = ""
+
+        while index < len(self.buffer):
+            char = self.buffer[index]
+            if char == "\\":
+                if index + 1 >= len(self.buffer):
+                    break
+                escape = self.buffer[index + 1]
+                if escape == "u":
+                    if index + 6 > len(self.buffer):
+                        break
+                    try:
+                        self.text += chr(int(self.buffer[index + 2 : index + 6], 16))
+                    except ValueError:
+                        pass
+                    index += 6
+                    continue
+                self.text += self._ESCAPES.get(escape, escape)
+                index += 2
+                continue
+            if char == '"':
+                self.done = True
+                index += 1
+                break
+            self.text += char
+            index += 1
+            if char in ".!?।":
+                if index < len(self.buffer):
+                    if self.buffer[index] in " \n":
+                        sentence = self.text.strip()
+                        if sentence:
+                            sentences.append(sentence)
+                        self.text = ""
+                else:
+                    # The boundary character ended this chunk; decide next feed.
+                    self._boundary_pending = True
+                    break
+
+        self.index = index
+        return sentences
+
+    def flush(self) -> list[str]:
+        if self._flushed:
+            return []
+        self._flushed = True
+        sentence = self.text.strip()
+        self.text = ""
+        return [sentence] if sentence else []
 
 
 STAGE_RANK = {
@@ -590,11 +678,13 @@ Fortivex AI sells autonomous AI voice agents that handle inbound and outbound sa
 
 YOUR JOB
 - Be warm, concise and consultative. Sound like a helpful human, not a brochure.
-- Answer questions using ONLY the KNOWLEDGE BASE EXCERPTS. If the answer is not there, say you will confirm with the team. Never invent pricing, security or integration claims.
+- Answer questions using ONLY the KNOWLEDGE BASE EXCERPTS. For any product/company/pricing/security/integration/onboarding/comparison question, do not use outside knowledge. If the answer is not in the excerpts, say clearly that you can confirm that with the Fortivex team and ask a relevant follow-up.
 - If the customer asks about pricing, quote the exact plan names and prices from the knowledge base (Starter $199/month, Growth $499/month, Enterprise custom). Never invent a different pricing model.
 - Qualify the lead on: name, company, need, budget, timeline and decision role.
 - Extract every explicit fact the customer states into lead_updates, using their exact words where possible.
-- Ask ONE question at a time. Keep replies under 60 spoken words. No markdown, no bullet lists.
+- Start your reply with a brief natural acknowledgement that fits the question, such as "Sure, I can help with that." / "Got it, let me explain." / "Absolutely, I can walk you through that." In Hindi use "जी, मैं बताती/बताता हूँ..." style natural phrasing. Do not use filler-only replies like "Sure." or "Ek minute." as the whole response.
+- After the acknowledgement, give the actual answer in the same reply. Do not make the user wait for a second message.
+- Ask at most ONE question at the end only when it helps move the conversation forward. Keep replies under 70 spoken words.
 - Move the conversation forward: greeting -> discovery -> qualification -> booking. Do not stay in greeting after the customer has shared their need.
 - Use the customer's first name naturally when you know it; do not repeat their company name back awkwardly.
 - When the lead is qualified and interested, offer the exact demo slots below and ask them to pick one.
@@ -638,13 +728,13 @@ Only fill lead_updates with NEW information the customer stated. Use null for ev
 """
 
         messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
-        messages.extend(session.history[-14:])
+        messages.extend(session.history[-10:])
         return messages
 
     # ------------------------------------------------------------------- chat
-    def handle_message(
-        self, session_id: str, message: str, language: str = "en-IN"
-    ) -> dict[str, Any]:
+    def _prepare_turn(
+        self, session_id: str, message: str, language: str
+    ) -> tuple[Session, str, list[dict[str, Any]], list[dict[str, str]]]:
         session = self._get_session(session_id)
         message = (message or "").strip()
         if not message:
@@ -656,19 +746,143 @@ Only fill lead_updates with NEW information the customer stated. Use null for ev
 
         retrieved = self.kb.search(message, k=3)
         slots = get_available_slots(limit=6)
+        return session, message, retrieved, slots
+
+    def handle_message(
+        self, session_id: str, message: str, language: str = "en-IN"
+    ) -> dict[str, Any]:
+        session, message, retrieved, slots = self._prepare_turn(
+            session_id, message, language
+        )
 
         try:
             data = self.llm.chat_json(
-                self._build_messages(session, retrieved, slots, language)
+                self._build_messages(session, retrieved, slots, language),
+                num_predict=420,
             )
         except LLMError as exc:
             logger.warning("Local LLM unavailable, using scripted fallback: %s", exc)
             data = self._fallback(session, message, retrieved, slots, language)
 
+        state, _ = self._finalise_turn(
+            session, data, message, retrieved, slots, language
+        )
+        return state
+
+    def handle_message_stream(
+        self, session_id: str, message: str, language: str = "en-IN"
+    ):
+        """Yield sentences while the model writes, then the final state.
+
+        The reply field is emitted as soon as each sentence is complete, so the
+        UI can start speaking in about two seconds instead of waiting for the
+        whole JSON object (which also carries scoring and CRM updates).
+        """
+        session, message, retrieved, slots = self._prepare_turn(
+            session_id, message, language
+        )
+
+        domain_keywords = (
+            "fortivex", "saathi", "price", "pricing", "cost", "plan", "plans",
+            "starter", "growth", "enterprise", "difference", "compare", "demo",
+            "security", "crm", "integration", "call", "sales", "lead", "booking",
+            "setup", "onboard", "pilot", "chatbot", "ai", "human", "voice",
+            "agent", "summary", "insight", "sentiment", "qualification",
+            "multilingual", "hindi", "english", "company", "product",
+        )
+        lower = message.lower()
+        out_of_scope = any(
+            k in lower
+            for k in (
+                "weather", "news", "ipl", "cricket", "recipe", "python script",
+                "scrape linkedin", "linkedin leads", "homework", "movie", "song",
+                "stock", "bitcoin",
+            )
+        )
+        fortivex_related = any(k in lower for k in domain_keywords)
+        force_fallback = out_of_scope or not fortivex_related
+
+        factual_intents = (
+            "price", "pricing", "cost", "plan", "plans", "starter", "growth",
+            "enterprise", "difference", "compare", "security", "secure", "privacy",
+            "compliance", "gdpr", "hipaa", "dpdp", "integrat", "hubspot",
+            "salesforce", "crm", "setup", "onboard", "how long", "timeline",
+            "what does", "what do you do", "who are you", "are you ai",
+            "are you human", "ai or human", "different from", "chatbot",
+        )
+        deterministic = force_fallback or any(k in lower for k in factual_intents)
+
+        if deterministic:
+            data = self._fallback(session, message, retrieved, slots, language)
+            reply = str(data.get("reply") or "").strip()
+            spoken = [reply] if reply else []
+            if reply:
+                yield {"type": "sentence", "text": reply}
+            state, extra = self._finalise_turn(
+                session, data, message, retrieved, slots, language, spoken=" ".join(spoken) if spoken else None
+            )
+            if extra:
+                yield {"type": "sentence", "text": extra}
+            yield {"type": "final", **state}
+            return
+
+        messages = self._build_messages(session, retrieved, slots, language)
+        extractor = _ReplyExtractor()
+        buffer = ""
+        spoken = []
+        data = None
+
+        try:
+            for delta in self.llm.chat_json_deltas(messages, num_predict=420):
+                buffer += delta
+                for sentence in extractor.feed(delta):
+                    spoken.append(sentence)
+                    yield {"type": "sentence", "text": sentence}
+            for sentence in extractor.flush():
+                spoken.append(sentence)
+                yield {"type": "sentence", "text": sentence}
+            data = extract_json(buffer)
+        except (LLMError, ValueError) as exc:
+            logger.warning("Streaming unavailable, using scripted fallback: %s", exc)
+
+        if data is None or not str(data.get("reply") or "").strip():
+            data = self._fallback(session, message, retrieved, slots, language)
+            if not spoken:
+                reply = str(data["reply"]).strip()
+                spoken = [reply]
+                yield {"type": "sentence", "text": reply}
+
+        state, extra = self._finalise_turn(
+            session,
+            data,
+            message,
+            retrieved,
+            slots,
+            language,
+            spoken=" ".join(spoken) if spoken else None,
+        )
+        if extra:
+            yield {"type": "sentence", "text": extra}
+        yield {"type": "final", **state}
+
+    def _finalise_turn(
+        self,
+        session: Session,
+        data: dict[str, Any],
+        message: str,
+        retrieved: list[dict[str, Any]],
+        slots: list[dict[str, str]],
+        language: str,
+        spoken: str | None = None,
+    ) -> tuple[dict[str, Any], str | None]:
+        extra: str | None = None
         reply = str(data.get("reply") or "").strip()
         if not reply:
             data = self._fallback(session, message, retrieved, slots, language)
             reply = str(data["reply"]).strip()
+        if spoken:
+            # Already spoken to the customer; never rewrite it after the fact.
+            reply = spoken
 
         sentiment = str(data.get("sentiment") or "neutral").lower()
         if sentiment not in {"positive", "neutral", "negative"}:
@@ -692,7 +906,8 @@ Only fill lead_updates with NEW information the customer stated. Use null for ev
             if value:
                 session.lead[key] = value
 
-        reply = _tidy_reply(reply, session.lead)
+        if not spoken:
+            reply = _tidy_reply(reply, session.lead)
 
         stage = str(data.get("stage") or session.stage)
         if stage not in STAGES:
@@ -714,9 +929,14 @@ Only fill lead_updates with NEW information the customer stated. Use null for ev
             if booking:
                 stage = "closing"
                 session.offered_slots = []
-                reply = _booking_confirmation(
+                confirmation = _booking_confirmation(
                     session.lead.get("name"), booking["label"], language
                 )
+                if spoken:
+                    reply = f"{spoken} {confirmation}".strip()
+                    extra = confirmation
+                else:
+                    reply = confirmation
             else:
                 reply = _append(
                     reply, "That slot was just taken. Let me offer you another time."
@@ -761,7 +981,7 @@ Only fill lead_updates with NEW information the customer stated. Use null for ev
                 "booking": booking or session.booking,
             }
         )
-        return state
+        return state, extra
 
     @staticmethod
     def _as_float(value: Any, default: float) -> float:
@@ -1070,143 +1290,138 @@ CALL LANGUAGE: {"Hindi (write every value in Devanagari Hindi)" if session.langu
         slots: list[dict[str, str]],
         language: str,
     ) -> dict[str, Any]:
-        """Deterministic sales script used if the local model is unavailable."""
+        """Deterministic, KB-grounded fallback when the local model is unavailable."""
         lower = text.lower()
-        lead = session.lead
-        updates: dict[str, str] = {}
-
-        email = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)
-        if email:
-            updates["email"] = email.group(0)
-        phone = re.search(r"(?:\+?\d[\d\s-]{7,}\d)", text)
-        if phone:
-            updates["phone"] = phone.group(0).strip()
-
-        name = re.search(
-            r"\b(?:my name is|this is|i am|i'm)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)",
-            text,
-        )
-        if name and name.group(1).lower() not in {
-            "looking",
-            "interested",
-            "from",
-            "the",
-            "a",
-            "an",
-            "not",
-            "here",
-        }:
-            updates["name"] = name.group(1)
-
-        company = re.search(
-            r"\b(?:from|at|work at|company is)\s+"
-            r"([A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,3})",
-            text,
-        )
-        if company:
-            updates["company"] = company.group(1).strip()
-
-        budget = re.search(
-            r"(?:budget|spend|afford)[^.\n]{0,40}", lower
-        )
-        if budget:
-            updates["budget"] = budget.group(0).strip()
-
-        timeline = re.search(
-            r"(?:in|within|next)\s+(\d+\s+(?:days?|weeks?|months?))", lower
-        )
-        if timeline:
-            updates["timeline"] = timeline.group(0).strip()
-
-        if any(word in lower for word in ("head of", "vp ", "director", "founder", "ceo", "cto", "manager")):
-            updates["decision_role"] = "Decision maker / senior stakeholder"
-
-        sentiment, sentiment_score = "neutral", 0.0
-        if any(word in lower for word in ("great", "good", "interested", "yes", "love", "perfect", "thanks")):
-            sentiment, sentiment_score = "positive", 0.35
-        if any(word in lower for word in ("not interested", "expensive", "too much", "problem", "bad")):
-            sentiment, sentiment_score = "negative", -0.35
-
-        stage = "discovery"
+        updates = _extract_lead_facts(text)
+        sentiment, sentiment_score = _lexicon_sentiment(text)
+        is_hi = language.lower().startswith("hi")
+        stage = session.stage or "discovery"
         action = None
 
-        if any(word in lower for word in ("price", "pricing", "cost", "plan", "how much")):
-            reply = (
-                "Our Growth plan starts at $499 per month for 1,000 call minutes; "
-                "Enterprise pricing is custom based on volume and integrations. "
-                "Most teams start with a 30-minute demo so we can size it accurately. "
-                "How many calls do you handle each month?"
-            )
-            stage = "qualification"
-        elif any(word in lower for word in ("security", "secure", "privacy", "compliance", "gdpr", "soc")):
-            reply = (
-                "We encrypt data in transit and at rest, enforce role-based access, "
-                "and support configurable retention. We can complete your security "
-                "review and sign an NDA or DPA. Is data residency or a specific "
-                "compliance standard a requirement?"
-            )
-            stage = "objection_handling"
-        elif any(word in lower for word in ("book", "demo", "meeting", "appointment", "schedule")):
-            if slots:
-                slot_text = ", ".join(slot["label"] for slot in slots[:3])
-                reply = (
-                    f"I can book a 30-minute demo. I have {slot_text} local time. "
-                    "Which works best for you?"
-                )
-                stage = "booking"
-                session.offered_slots = slots[:3]
-            else:
-                reply = "I can arrange a demo. Let me check the calendar and come back to you."
-        elif _is_affirmative(text) and session.offered_slots:
-            action = {"type": "book_slot", "slot_id": session.offered_slots[0]["id"]}
-            reply = "Great, I'll book that for you."
-            stage = "closing"
-        elif any(word in lower for word in ("not interested", "no thanks", "stop")):
-            reply = (
-                "No problem, I appreciate your time. If it helps, I can send a short "
-                "overview you can review later. Would that be useful?"
-            )
-            stage = "closing"
-        elif any(word in lower for word in ("hi", "hello", "hey")) and len(lower) < 25:
-            reply = GREETING
-            stage = "greeting"
-        elif not lead.get("name"):
-            reply = "Happy to help. May I know your name?"
-            stage = "discovery"
-        elif not lead.get("need"):
-            reply = "What are you looking to automate or improve in your sales process?"
-            stage = "discovery"
-        elif not lead.get("budget"):
-            reply = "Do you have a budget range in mind for this initiative?"
-            stage = "qualification"
-        elif not lead.get("timeline"):
-            reply = "What timeline are you working towards?"
-            stage = "qualification"
-        elif not lead.get("decision_role"):
-            reply = "Are you the person who will make the final decision on this?"
-            stage = "qualification"
-        else:
-            if slots:
-                slot_text = ", ".join(slot["label"] for slot in slots[:3])
-                reply = (
-                    f"Thanks, that helps. I can book a 30-minute demo. I have "
-                    f"{slot_text} local time. Which works best?"
-                )
-                stage = "booking"
-                session.offered_slots = slots[:3]
-            else:
-                reply = "Thanks, that helps. Let me check the calendar and follow up with times."
+        def pick_source(*keywords: str) -> list[dict[str, Any]]:
+            chosen = []
+            for chunk in retrieved:
+                src = (chunk.get("source") or "").lower()
+                body = (chunk.get("text") or "").lower()
+                if any(k in src or k in body for k in keywords):
+                    chosen.append(chunk)
+            return chosen or retrieved[:2]
 
-        return {
-            "reply": reply,
-            "language": "hi" if language.lower().startswith("hi") else "en",
-            "sentiment": sentiment,
-            "sentiment_score": sentiment_score,
-            "intent": "fallback",
-            "stage": stage,
-            "lead_updates": updates,
-            "action": action,
-        }
+        def say(en: str, hi: str, next_stage: str | None = None) -> dict[str, Any]:
+            return {
+                "reply": hi if is_hi else en,
+                "language": "hi" if is_hi else "en",
+                "sentiment": sentiment,
+                "sentiment_score": sentiment_score,
+                "intent": "fallback",
+                "stage": next_stage or stage,
+                "lead_updates": updates,
+                "action": action,
+            }
+
+        # Booking intent / confirmation
+        if session.offered_slots and _is_affirmative(text):
+            action = {"type": "book_slot", "slot_id": session.offered_slots[0]["id"]}
+            return say("Got it, I can book that slot for you now.", "जी, मैं अभी वह स्लॉट बुक कर देती/देता हूँ।", "closing")
+        if any(word in lower for word in ("book", "demo", "meeting", "appointment", "schedule", "डेमो", "बुक")):
+            if slots:
+                session.offered_slots = slots[:3]
+                slot_text = ", ".join(slot["label"] for slot in slots[:3])
+                return say(
+                    f"Sure, I can help with that. I can book a 30-minute demo. Available slots are {slot_text}. Which one works best for you?",
+                    f"जी, मैं इसमें मदद कर सकती/सकता हूँ। मैं 30 मिनट का डेमो बुक कर सकती/सकता हूँ। उपलब्ध स्लॉट हैं: {slot_text}। आपके लिए कौन सा सही रहेगा?",
+                    "booking",
+                )
+            return say(
+                "Sure, I can help with booking a demo. I don't see available slots right now, but I can confirm with the Fortivex team.",
+                "जी, मैं डेमो बुक करने में मदद कर सकती/सकता हूँ। अभी उपलब्ध स्लॉट नहीं दिख रहे हैं, लेकिन मैं Fortivex टीम से पुष्टि कर सकती/सकता हूँ।",
+                "booking",
+            )
+
+        # Domain factual answers grounded in KB
+        if any(word in lower for word in ("price", "pricing", "cost", "plan", "how much", "starter", "growth", "enterprise", "कीमत", "प्लान")):
+            return say(
+                "Sure, I can help with pricing. Fortivex AI offers Starter at $199 per month with 300 call minutes and 1 number, Growth at $499 per month with 1,000 minutes, 3 numbers, multilingual support and CRM/calendar integrations, and Enterprise with custom pricing for volume, security and custom integrations. Would you like me to recommend a plan based on your call volume?",
+                "जी, मैं कीमत बता सकती/सकता हूँ। Fortivex AI के तीन प्लान हैं: Starter $199 प्रति माह (300 call minutes, 1 number), Growth $499 प्रति माह (1,000 minutes, 3 numbers, multilingual support, CRM/calendar integrations), और Enterprise custom pricing के साथ volume, security और custom integrations के लिए। क्या आप अपनी call volume बताएं ताकि मैं सही प्लान सुझा सकूँ?",
+                "qualification",
+            )
+        if any(word in lower for word in ("what does", "what do you do", "fortivex", "company", "product", "saathi", "who are you", "क्या करते")) and not any(w in lower for w in ("weather", "news", "ipl", "recipe")):
+            return say(
+                "Sure, I can explain that. Fortivex AI builds autonomous AI voice agents for inbound and outbound sales calls. Saathi can answer product questions from approved knowledge, qualify leads, book demos, update CRM records, and generate call summaries and insights. What are you looking to automate in your sales process?",
+                "जी, मैं बताती/बताता हूँ। Fortivex AI inbound और outbound sales calls के लिए autonomous AI voice agents बनाता है। Saathi approved knowledge से जवाब दे सकता है, leads qualify कर सकता है, demo बुक कर सकता है, CRM अपडेट कर सकता है, और call summaries तथा insights बना सकता है। आप अपनी sales process में क्या automate करना चाहते हैं?",
+                "discovery",
+            )
+        if any(word in lower for word in ("different", "chatbot", "normal bot")):
+            return say(
+                "Got it, that's a great question. Saathi is voice-first and built for sales conversations, not just a text chatbot. It uses RAG-grounded answers, contextual memory, lead qualification, sentiment analysis, demo booking, CRM updates, and post-call summaries. Would you like to see how it would handle your inbound calls?",
+                "जी, अच्छा सवाल है। Saathi voice-first है और sales conversations के लिए बना है, सिर्फ text chatbot नहीं। यह RAG-grounded जवाब, contextual memory, lead qualification, sentiment analysis, demo booking, CRM updates, और post-call summaries देता है। क्या आप देखना चाहेंगे कि यह आपकी inbound calls कैसे संभालेगा?",
+                "discovery",
+            )
+        if any(word in lower for word in ("security", "secure", "privacy", "compliance", "gdpr", "dpdp", "hipaa", "data", "सुरक्षा")):
+            return say(
+                "Absolutely, I can walk you through security. Fortivex AI uses TLS 1.3 for data in transit and AES-256 encryption at rest for recordings, transcripts, and CRM data. Customer data is logically isolated per workspace, and Enterprise supports RBAC, audit logs, SSO/SAML, and private deployment options. Do you have a specific compliance requirement I should confirm with the team?",
+                "जी, मैं सुरक्षा के बारे में बताती/बताता हूँ। Fortivex AI data in transit के लिए TLS 1.3 और recordings, transcripts, CRM data के लिए AES-256 encryption at rest उपयोग करता है। Customer data workspace-wise isolated रहता है, और Enterprise में RBAC, audit logs, SSO/SAML, और private deployment विकल्प हैं। क्या आपकी कोई specific compliance requirement है जिसे मैं टीम से confirm करूँ?",
+                "objection_handling",
+            )
+        if any(word in lower for word in ("integrat", "crm", "hubspot", "salesforce", "calendar", "telephony", "twilio")):
+            return say(
+                "Sure, I can help with integrations. Fortivex AI supports prebuilt CRM connectors like HubSpot, Salesforce, Pipedrive, Zoho CRM, and Microsoft Dynamics, and other CRMs via REST API or webhooks. It also supports calendar booking and telephony providers like Twilio, Exotel, Vonage, and SIP trunks. Which system are you using today?",
+                "जी, मैं integrations के बारे में बता सकती/सकता हूँ। Fortivex AI HubSpot, Salesforce, Pipedrive, Zoho CRM, और Microsoft Dynamics जैसे prebuilt CRM connectors support करता है, और बाकी CRMs REST API या webhooks से जोड़े जा सकते हैं। Calendar booking और Twilio, Exotel, Vonage, SIP trunks जैसे telephony providers भी supported हैं। आप अभी कौन सा system use कर रहे हैं?",
+                "discovery",
+            )
+        if any(word in lower for word in ("setup", "onboard", "how long", "timeline", "go live", "weeks")):
+            return say(
+                "Sure, I can explain the timeline. A standard pilot goes live in 2 to 4 weeks: week one covers knowledge-base ingestion and voice selection, week two covers CRM and calendar integration and testing, and weeks three to four cover a controlled pilot with live traffic. When are you hoping to launch?",
+                "जी, मैं timeline बता सकती/सकता हूँ। एक standard pilot 2 से 4 हफ्तों में live हो जाता है: पहला हफ्ता knowledge-base ingestion और voice selection, दूसरा हफ्ता CRM/calendar integration और testing, और तीसरे-चौथे हफ्ते controlled pilot with live traffic। आप कब तक launch करना चाहते हैं?",
+                "qualification",
+            )
+        if any(word in lower for word in ("ai or human", "are you ai", "real person", "are you human", "bot or human")):
+            return say(
+                "I'm happy to clarify. I'm Saathi, an AI sales assistant from Fortivex AI. I can help with product questions, lead qualification, and demo booking. Would you like me to walk you through what I can do for your team?",
+                "मैं साफ बता दूँ। मैं Saathi हूँ, Fortivex AI की AI sales assistant। मैं product सवालों, lead qualification, और demo booking में मदद कर सकती/सकता हूँ। क्या आप चाहेंगे कि मैं बताऊँ मैं आपकी टीम के लिए क्या कर सकती/सकता हूँ?",
+                "discovery",
+            )
+        if any(word in lower for word in ("expensive", "costly", "too much", "budget")) and "budget" not in updates:
+            return say(
+                "I understand the concern. Fortivex AI is designed to reduce repetitive sales work, and plans start at $199 per month, with Growth at $499 and Enterprise custom. There's also a 14-day paid pilot with 100 minutes so you can validate ROI before committing. What monthly call volume are you expecting?",
+                "मैं आपकी चिंता समझ सकती/सकता हूँ। Fortivex AI repetitive sales work कम करने के लिए बना है। प्लान $199 प्रति माह से शुरू होते हैं, Growth $499 है, और Enterprise custom है। 14-day paid pilot with 100 minutes भी available है। आप हर महीने कितनी calls expect कर रहे हैं?",
+                "objection_handling",
+            )
+
+        # Out-of-scope / unknown: no guessing
+        domain_keywords = ("fortivex", "saathi", "price", "pricing", "cost", "plan", "demo", "security", "crm", "integration", "call", "sales", "lead", "booking", "setup", "onboard", "pilot", "chatbot", "ai", "human", "voice", "agent", "summary", "insight", "sentiment", "qualification", "multilingual", "hindi", "english")
+        out_of_scope = any(k in lower for k in ("weather", "news", "ipl", "cricket", "recipe", "python script", "scrape linkedin", "linkedin leads", "homework", "movie", "song", "stock", "bitcoin"))
+        if out_of_scope or not any(k in lower for k in domain_keywords):
+            return {
+                "reply": "I can help with Fortivex AI product, pricing, security, integrations, and demo booking. I don't have that information in the current Fortivex knowledge base, but I can confirm it with the Fortivex team. Would you like to ask something about Fortivex AI?" if not is_hi else "मैं Fortivex AI के product, pricing, security, integrations, और demo booking में मदद कर सकती/सकता हूँ। मेरे पास यह जानकारी current knowledge base में नहीं है, लेकिन मैं Fortivex टीम से confirm कर सकती/सकता हूँ। क्या आप Fortivex AI के बारे में कुछ पूछना चाहेंगे?",
+                "language": "hi" if is_hi else "en",
+                "sentiment": sentiment,
+                "sentiment_score": sentiment_score,
+                "intent": "out_of_scope",
+                "stage": "discovery",
+                "lead_updates": updates,
+                "action": None,
+            }
+
+        # If retrieved but no specific handler, provide grounded summary from top chunk
+        if retrieved:
+            top = retrieved[0]["text"].split("\n")
+            snippet = " ".join([line.strip("#- ").strip() for line in top if line.strip()][:2])
+            snippet = re.sub(r"\s+", " ", snippet).strip()
+            if len(snippet) > 220:
+                snippet = snippet[:217].rsplit(" ", 1)[0] + "..."
+            return say(
+                f"Sure, I can help with that. Based on Fortivex's approved information: {snippet} Would you like me to go deeper on this?",
+                f"जी, मैं इसमें मदद कर सकती/सकता हूँ। Fortivex की approved जानकारी के अनुसार: {snippet} क्या आप चाहेंगे कि मैं इसे और detail में समझाऊँ?",
+                "discovery",
+            )
+
+        # Final safe fallback
+        return say(
+            "I want to be accurate. I don't have that information in the current Fortivex knowledge base, but I can confirm with the team. Could you share what you're looking to solve with sales calls?",
+            "मैं सही जानकारी देना चाहती/चाहता हूँ। मेरे पास यह जानकारी current Fortivex knowledge base में नहीं है, लेकिन मैं टीम से confirm कर सकती/सकता हूँ। क्या आप बता सकते हैं कि आप sales calls में क्या solve करना चाहते हैं?",
+            "discovery",
+        )
 
     # ------------------------------------------------------------------ system
     def health(self) -> dict[str, Any]:

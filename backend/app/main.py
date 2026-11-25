@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response, StreamingResponse
 
 from . import config, db
 from .agent import SalesAgent
-from .schemas import BookRequest, ChatRequest
+from .schemas import BookRequest, ChatRequest, TTSRequest
+from .tts import VoiceClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,6 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 agent: SalesAgent | None = None
+voice = VoiceClient()
 
 
 @asynccontextmanager
@@ -37,10 +41,11 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="Fortivex AI - Autonomous Sales Voice Agent",
+    title="Saathi - Autonomous Sales Voice Agent",
     description=(
-        "Open-source MVP: local LLM sales agent with RAG, lead qualification, "
-        "sentiment analysis, appointment booking, CRM sync and call insights."
+        "Open-source MVP: local LLM sales agent with a local neural voice, RAG, "
+        "lead qualification, sentiment analysis, appointment booking, CRM sync "
+        "and call insights."
     ),
     version="1.0.0",
     lifespan=lifespan,
@@ -64,7 +69,7 @@ def get_agent() -> SalesAgent:
 @app.get("/")
 def root() -> dict[str, Any]:
     return {
-        "name": "Autonomous AI Sales Voice Agent",
+        "name": "Saathi - A companion for business conversations",
         "docs": "/docs",
         "health": "/api/health",
     }
@@ -72,7 +77,23 @@ def root() -> dict[str, Any]:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return get_agent().health()
+    data = get_agent().health()
+    data["voice"] = voice.status()
+    return data
+
+
+@app.post("/api/tts")
+def synthesize(payload: TTSRequest) -> Response:
+    """Speak a reply with the local neural voice; 503 lets the UI fall back."""
+    result = voice.synthesize(payload.text, payload.language)
+    if result is None:
+        raise HTTPException(status_code=503, detail="Neural voice unavailable")
+    audio, engine = result
+    return Response(
+        content=audio,
+        media_type="audio/wav",
+        headers={"Cache-Control": "no-store", "X-Voice-Engine": engine},
+    )
 
 
 @app.post("/api/session")
@@ -101,6 +122,31 @@ def chat(payload: ChatRequest) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.exception("Chat failed")
         raise HTTPException(status_code=500, detail="Agent error") from exc
+
+
+@app.post("/api/chat/stream")
+def chat_stream(payload: ChatRequest) -> StreamingResponse:
+    """Newline-delimited JSON: ``sentence`` events first, then ``final``."""
+
+    def events():
+        try:
+            for event in get_agent().handle_message_stream(
+                payload.session_id, payload.message, payload.language
+            ):
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+        except KeyError as exc:
+            yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
+        except ValueError as exc:
+            yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
+        except Exception:  # noqa: BLE001
+            logger.exception("Chat stream failed")
+            yield json.dumps({"type": "error", "detail": "Agent error"}) + "\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/session/{session_id}/book")

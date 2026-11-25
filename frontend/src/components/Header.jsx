@@ -10,9 +10,12 @@ export default function Header({
   voiceEnabled,
   onToggleVoice,
   sttSupported,
+  voiceEngine,
+  voiceAvailable,
 }) {
   const llm = health?.llm;
   const rag = health?.rag;
+  const neuralVoice = voiceAvailable || voiceEngine === "neural";
 
   let badgeClass = "badge--warn";
   let badgeText = "Checking Ollama";
@@ -40,7 +43,7 @@ export default function Header({
         <div className="brand__mark">F</div>
         <div>
           <h1 className="brand__name">Fortivex AI</h1>
-          <p className="brand__sub">Mira · Autonomous Sales Voice Agent</p>
+          <p className="brand__sub">Saathi · A companion for business conversations</p>
         </div>
       </div>
 
@@ -52,8 +55,19 @@ export default function Header({
         <span className="badge badge--muted" title="Knowledge retrieval mode">
           RAG · {rag?.mode || "…"}
         </span>
-        <span className="badge badge--muted" title="Browser speech support">
-          {sttSupported ? "Voice ready" : "Text only"}
+        <span
+          className={`badge ${neuralVoice ? "badge--ok" : "badge--muted"}`}
+          title={
+            neuralVoice
+              ? "Kokoro neural voice running locally"
+              : "Using the browser voice; start the local voice service for the natural voice"
+          }
+        >
+          <span className="badge__dot" />
+          {neuralVoice ? "Neural voice" : "Browser voice"}
+        </span>
+        <span className="badge badge--muted" title="Browser speech recognition">
+          {sttSupported ? "Mic ready" : "Text only"}
         </span>
         {llm?.model && (
           <span className="badge badge--muted" title="Configured local model">

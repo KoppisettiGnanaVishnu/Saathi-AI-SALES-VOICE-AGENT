@@ -96,9 +96,13 @@ class OllamaClient:
             "messages": messages,
             "stream": False,
             "format": "json",
+            # Keep the model resident between turns and give the prompt enough
+            # room that retrieval context is never silently truncated.
+            "keep_alive": "30m",
             "options": {
                 "temperature": temperature,
                 "num_predict": num_predict,
+                "num_ctx": 4096,
                 "top_p": 0.9,
             },
         }
@@ -131,6 +135,53 @@ class OllamaClient:
                     payload["options"]["temperature"] = 0.1
 
         raise LLMError(f"Local model failed to return usable JSON: {last_error}")
+
+    def chat_json_deltas(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.25,
+        num_predict: int = 420,
+    ):
+        """Yield content deltas from Ollama so the caller can speak early.
+
+        Ollama still emits one JSON object (``format: json``); we stream its
+        tokens and let the agent pull the ``reply`` string out as it forms.
+        """
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "format": "json",
+            "keep_alive": "30m",
+            "options": {
+                "temperature": temperature,
+                "num_predict": num_predict,
+                "num_ctx": 4096,
+                "top_p": 0.9,
+            },
+        }
+
+        try:
+            with self._client.stream(
+                "POST", f"{self.base_url}/api/chat", json=payload
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if chunk.get("error"):
+                        raise LLMError(str(chunk["error"]))
+                    delta = chunk.get("message", {}).get("content") or ""
+                    if delta:
+                        yield delta
+                    if chunk.get("done"):
+                        return
+        except httpx.HTTPError as exc:
+            raise LLMError(f"Streaming chat failed: {exc}") from exc
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Create embeddings with Ollama, supporting both embed API shapes."""

@@ -53,10 +53,13 @@ export default function App() {
 
   const {
     speak,
+    enqueue: enqueueSpeech,
     cancel: cancelSpeech,
     speaking,
     enabled: voiceEnabled,
     setEnabled: setVoiceEnabled,
+    engine: voiceEngine,
+    prewarm,
   } = useSpeechSynthesis();
 
   const {
@@ -100,45 +103,49 @@ export default function App() {
     }
   }, []);
 
-  const startSession = useCallback(async () => {
-    setStarting(true);
-    setError("");
-    setSummary(null);
-    setText("");
-    setLead({});
-    setLeadScore(0);
-    setLeadStatus("cold");
-    setSentiment("neutral");
-    setStage("greeting");
-    setBooking(null);
-    setSlots([]);
-    setKnowledgeUsed([]);
-    setCrmSyncedAt(null);
-    setMessages([]);
+  const startSession = useCallback(
+    async ({ announce = false } = {}) => {
+      setStarting(true);
+      setError("");
+      setSummary(null);
+      setText("");
+      setLead({});
+      setLeadScore(0);
+      setLeadStatus("cold");
+      setSentiment("neutral");
+      setStage("greeting");
+      setBooking(null);
+      setSlots([]);
+      setKnowledgeUsed([]);
+      setCrmSyncedAt(null);
+      setMessages([]);
 
-    try {
-      const data = await api.createSession();
-      setSessionId(data.session_id);
-      applyState(data);
-      setMessages([
-        {
-          id: uid(),
-          role: "assistant",
-          text: data.greeting,
-          meta: { stage: "greeting", sentiment: "neutral" },
-        },
-      ]);
-      setCallActive(true);
-    } catch (err) {
-      setError(
-        err.message ||
-          "Could not start a call. Make sure the backend is running on port 8000.",
-      );
-      setCallActive(false);
-    } finally {
-      setStarting(false);
-    }
-  }, [applyState]);
+      try {
+        const data = await api.createSession();
+        setSessionId(data.session_id);
+        applyState(data);
+        setMessages([
+          {
+            id: uid(),
+            role: "assistant",
+            text: data.greeting,
+            meta: { stage: "greeting", sentiment: "neutral" },
+          },
+        ]);
+        setCallActive(true);
+        if (announce) speak(data.greeting, language);
+      } catch (err) {
+        setError(
+          err.message ||
+            "Could not start a call. Make sure the backend is running on port 8000.",
+        );
+        setCallActive(false);
+      } finally {
+        setStarting(false);
+      }
+    },
+    [applyState, language, speak],
+  );
 
   useEffect(() => {
     if (startedRef.current) return;
@@ -147,6 +154,10 @@ export default function App() {
     refreshInsights();
     refreshHealth();
   }, [refreshHealth, refreshInsights, startSession]);
+
+  useEffect(() => {
+    prewarm(language);
+  }, [language, prewarm]);
 
   useEffect(() => {
     const interval = setInterval(refreshHealth, 30000);
@@ -170,31 +181,63 @@ export default function App() {
       cancelSpeech();
       stopListening();
 
+      const assistantId = uid();
       setMessages((previous) => [
         ...previous,
         { id: uid(), role: "user", text: message },
+        {
+          id: assistantId,
+          role: "assistant",
+          text: "",
+          pending: true,
+          meta: { stage, sentiment: "neutral", sources: [] },
+        },
       ]);
 
       try {
-        const data = await api.chat(sessionId, message, language);
-        applyState(data);
-        setMessages((previous) => [
-          ...previous,
-          {
-            id: uid(),
-            role: "assistant",
-            text: data.reply,
-            meta: {
-              sentiment: data.sentiment,
-              stage: data.stage,
-              sources: data.knowledge_used,
-            },
+        let spokenText = "";
+        const data = await api.chatStream(
+          sessionId,
+          message,
+          language,
+          (event) => {
+            if (event.type !== "sentence") return;
+            const sentence = String(event.text || "").trim();
+            if (!sentence) return;
+            spokenText = `${spokenText} ${sentence}`.trim();
+            enqueueSpeech(sentence, language);
+            setMessages((previous) =>
+              previous.map((msg) =>
+                msg.id === assistantId
+                  ? { ...msg, text: spokenText, pending: false }
+                  : msg,
+              ),
+            );
           },
-        ]);
+        );
+        applyState(data);
+        setMessages((previous) =>
+          previous.map((msg) =>
+            msg.id === assistantId
+              ? {
+                  ...msg,
+                  text: data.reply,
+                  pending: false,
+                  meta: {
+                    sentiment: data.sentiment,
+                    stage: data.stage,
+                    sources: data.knowledge_used,
+                  },
+                }
+              : msg,
+          ),
+        );
         if (data.booking) setToast(`Demo booked · ${data.booking.label}`);
         refreshInsights();
-        speak(data.reply, language);
       } catch (err) {
+        setMessages((previous) =>
+          previous.filter((msg) => !(msg.id === assistantId && !msg.text)),
+        );
         setError(err.message || "The agent could not respond. Please try again.");
       } finally {
         setBusy(false);
@@ -205,10 +248,11 @@ export default function App() {
       busy,
       callActive,
       cancelSpeech,
+      enqueueSpeech,
       language,
       refreshInsights,
       sessionId,
-      speak,
+      stage,
       stopListening,
     ],
   );
@@ -288,7 +332,7 @@ export default function App() {
   const handleNewCall = useCallback(() => {
     cancelSpeech();
     stopListening();
-    startSession();
+    startSession({ announce: true });
     refreshInsights();
   }, [cancelSpeech, refreshInsights, startSession, stopListening]);
 
@@ -305,7 +349,7 @@ export default function App() {
       cancelSpeech();
       stopListening();
       await api.reset();
-      await startSession();
+      await startSession({ announce: true });
       await refreshInsights();
       setToast("Demo data cleared");
     } catch (err) {
@@ -376,6 +420,8 @@ export default function App() {
         voiceEnabled={voiceEnabled}
         onToggleVoice={() => setVoiceEnabled((value) => !value)}
         sttSupported={sttSupported}
+        voiceEngine={voiceEngine}
+        voiceAvailable={health?.voice?.reachable}
       />
 
       <InsightsBar insights={insights} />

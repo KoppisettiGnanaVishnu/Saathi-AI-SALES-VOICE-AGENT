@@ -21,7 +21,7 @@ Point at the header badges: model, RAG mode, backend status.
 
 ## Minute 1–2 — Start the call
 
-Click **Start call**. Mira greets you by voice.
+Click **Start call**. Saathi greets you by voice.
 
 Say or type:
 
