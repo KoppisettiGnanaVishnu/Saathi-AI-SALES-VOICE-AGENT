@@ -23,7 +23,7 @@ flowchart TB
         SCORE[Lead scorer]
         SENT[Sentiment fusion]
         TOOLS[Booking / CRM tools]
-        TTSAPI[/api/tts]
+        TTSAPI["/api/tts"]
     end
 
     subgraph Intelligence["AI providers"]
@@ -35,10 +35,10 @@ flowchart TB
 
     subgraph Data["Persistence"]
         KB[(Markdown knowledge base)]
-        SQL[(SQLite: leads, appointments, calls, turns)]
+        SQL[("SQLite: leads, appointments, calls, turns")]
     end
 
-    APP -->|POST /api/chat or /stream| ROUTES
+    APP -->|"POST /api/chat or /stream"| ROUTES
     ROUTES --> AGENT
     AGENT --> PROMPT
     PROMPT --> GROQ
@@ -54,7 +54,7 @@ flowchart TB
     SENT --> SQL
     AGENT -->|JSON reply + slots + state| ROUTES
     ROUTES --> APP
-    APP -->|POST /api/tts| TTSAPI
+    APP -->|"POST /api/tts"| TTSAPI
     TTSAPI --> KOKORO
     KOKORO --> AUDIO
     AUDIO -->|fallback| BROWSER[Browser speechSynthesis]
@@ -69,7 +69,7 @@ sequenceDiagram
     participant B as Browser
     participant A as FastAPI
     participant R as Retriever
-    participant L as LLM (Groq/Ollama)
+    participant L as LLM provider
     participant D as SQLite
     participant T as Kokoro TTS
 
@@ -94,7 +94,7 @@ sequenceDiagram
 
 ## 4. Retrieval design
 
-1. Documents in `data/knowledge/` are split on Markdown headings into ~69 chunks with source and heading metadata.
+1. Documents in `data/knowledge/` are split on Markdown headings into 85 chunks with source and heading metadata.
 2. If embeddings are enabled, each chunk is embedded once with `nomic-embed-text` at startup and normalised into a matrix.
 3. A query is embedded and compared by cosine similarity. If the best score is below `0.2`, the keyword path runs instead.
 4. Keyword search tokenises the query, expands Hindi terms and English synonyms (`cost → pricing price plan`, `integrate → crm calendar`), scores overlap with a heading bonus, and applies an intent-aware source boost so pricing questions prefer `03-pricing.md` and security questions prefer `04-security.md`.
@@ -172,7 +172,7 @@ flowchart LR
     API1 --> PG[(Postgres primary)]
     PG --> REPL[(Read replicas)]
     API1 --> Q[Job queue]
-    Q --> INF[GPU inference pool<br/>vLLM / Ollama]
+    Q --> INF["GPU inference pool<br/>vLLM or Ollama"]
     Q --> STT[Whisper workers]
     Q --> TTS[Piper workers]
     API1 --> VDB[(pgvector / Qdrant)]
