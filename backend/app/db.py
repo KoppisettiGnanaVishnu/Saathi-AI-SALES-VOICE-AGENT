@@ -18,6 +18,7 @@ LEAD_COLUMNS = [
     "budget",
     "timeline",
     "decision_role",
+    "call_volume",
     "interest_level",
 ]
 
@@ -52,6 +53,7 @@ def init_db() -> None:
                 budget TEXT,
                 timeline TEXT,
                 decision_role TEXT,
+                call_volume TEXT,
                 interest_level TEXT,
                 score INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'cold',
@@ -83,6 +85,12 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_appointments_session ON appointments(session_id);
             """
         )
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(leads)").fetchall()
+        }
+        if "call_volume" not in cols:
+            conn.execute("ALTER TABLE leads ADD COLUMN call_volume TEXT")
 
 
 def get_lead(session_id: str) -> dict[str, Any] | None:
@@ -118,9 +126,9 @@ def upsert_lead(
             """
             INSERT INTO leads (
                 session_id, name, company, email, phone, need, budget, timeline,
-                decision_role, interest_level, score, status, sentiment,
+                decision_role, call_volume, interest_level, score, status, sentiment,
                 sentiment_score, stage, crm_synced_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 name = excluded.name,
                 company = excluded.company,
@@ -130,6 +138,7 @@ def upsert_lead(
                 budget = excluded.budget,
                 timeline = excluded.timeline,
                 decision_role = excluded.decision_role,
+                call_volume = excluded.call_volume,
                 interest_level = excluded.interest_level,
                 score = excluded.score,
                 status = excluded.status,
@@ -149,6 +158,7 @@ def upsert_lead(
                 values["budget"],
                 values["timeline"],
                 values["decision_role"],
+                values["call_volume"],
                 values["interest_level"],
                 int(score),
                 status,

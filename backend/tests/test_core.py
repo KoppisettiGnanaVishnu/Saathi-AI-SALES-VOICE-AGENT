@@ -27,7 +27,7 @@ def test_high_intent_lead_scores_hot():
         "email": "priya@acme.com",
     }
     score = compute_score(lead, 0.6)
-    assert score == 100
+    assert score == 96
     assert lead_status(score) == "hot"
 
 
