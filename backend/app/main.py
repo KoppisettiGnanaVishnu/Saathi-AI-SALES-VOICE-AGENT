@@ -82,6 +82,12 @@ def health() -> dict[str, Any]:
     return data
 
 
+@app.get("/health")
+def health_alias() -> dict[str, Any]:
+    """Alias for platform probes that call /health instead of /api/health."""
+    return health()
+
+
 @app.post("/api/tts")
 def synthesize(payload: TTSRequest) -> Response:
     """Speak a reply with the local neural voice; 503 lets the UI fall back."""
